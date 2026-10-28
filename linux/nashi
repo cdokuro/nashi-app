@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""
+Nashi Linux 2.0 - Entry Point
+Forces XCB/XWayland platform on Wayland sessions so floating radial wheels,
+HUD toasts, and global drag-mode detection position at exact cursor coordinates.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# Force XCB on Wayland before importing QtGui/QtWidgets so QCursor.pos() and
+# frameless window positioning work at exact global coordinates.
+if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" and not os.environ.get("QT_QPA_PLATFORM"):
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+
+from main_window import main
+
+if __name__ == "__main__":
+    main()
