@@ -195,25 +195,30 @@ class WebDownloadDialog(QDialog):
         pal = self.theme_pal
         self.setStyleSheet(f"""
             QDialog {{
-                background-color: {pal['bg']};
-                color: {pal['text']};
+                background-color: {pal['paper']};
+                color: {pal['ink']};
+                font-family: 'Inter', 'Noto Sans', 'Segoe UI', sans-serif;
             }}
             QFrame#UrlBox {{
-                background-color: {pal['card_bg']};
-                border: 1.5px solid {pal['card_border']};
-                border-radius: 10px;
-            }}
-            QFrame#MediaCard {{
-                background-color: {pal['card_bg']};
-                border: 1px solid {pal['card_border']};
+                background-color: {pal['surface']};
+                border: 1.5px solid {pal['line']};
                 border-radius: 12px;
             }}
+            QFrame#MediaCard {{
+                background-color: {pal['surface']};
+                border: 1px solid {pal['line']};
+                border-radius: 16px;
+            }}
+            QLabel {{
+                background: transparent;
+                color: {pal['ink']};
+            }}
             QPushButton {{
-                background-color: {pal['card_bg']};
-                color: {pal['text']};
-                border: 1px solid {pal['card_border']};
-                border-radius: 7px;
-                padding: 6px 14px;
+                background-color: {pal['surface']};
+                color: {pal['ink']};
+                border: 1px solid {pal['line']};
+                border-radius: 9px;
+                padding: 7px 16px;
                 font-size: 12px;
                 font-weight: 600;
             }}
@@ -221,39 +226,40 @@ class WebDownloadDialog(QDialog):
                 border-color: {pal['gold']};
             }}
             QPushButton#PrimaryButton {{
-                background-color: {pal['gold']};
-                color: #1A1D1A;
-                border: none;
+                background-color: {pal['sand']};
+                color: {pal['ink']};
+                border: 1px solid {pal['line']};
             }}
             QPushButton#PrimaryButton:hover {{
-                background-color: {pal['gold_hover']};
+                border-color: {pal['gold']};
+                background-color: {pal['surface']};
             }}
             QPushButton#AccentDownloadButton {{
-                background-color: {pal['gold']};
-                color: #1A1D1A;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {pal['gold']}, stop:1 {pal['gold_end']});
+                color: {pal['button_ink']};
                 border: none;
-                padding: 8px 22px;
+                padding: 9px 24px;
                 font-size: 13px;
                 font-weight: 800;
-                border-radius: 8px;
+                border-radius: 10px;
             }}
             QPushButton#AccentDownloadButton:hover {{
-                background-color: {pal['gold_hover']};
+                background: {pal['gold_end']};
             }}
             QPushButton#AccentDownloadButton:disabled {{
-                background-color: #555555;
-                color: #888888;
+                background: {pal['inset']};
+                color: {pal['muted']};
             }}
             QComboBox {{
-                background-color: {pal['bg']};
-                color: {pal['text']};
-                border: 1px solid {pal['card_border']};
-                border-radius: 6px;
-                padding: 5px 10px;
+                background-color: {pal['inset']};
+                color: {pal['ink']};
+                border: 1px solid {pal['line']};
+                border-radius: 8px;
+                padding: 6px 12px;
                 font-size: 12px;
             }}
             QProgressBar {{
-                background-color: {pal['card_border']};
+                background-color: {pal['inset']};
                 border-radius: 2px;
             }}
             QProgressBar::chunk {{
