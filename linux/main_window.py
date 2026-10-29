@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMenu, QScrollArea, QCheckBox, QInputDialog
 )
 
+from version import __version__
 from engine import NashiEngine
 from store import get_store, NashiStore
 from floating_wheel import FloatingRadialWheel
@@ -702,6 +703,21 @@ class NashiMainWindow(QMainWindow):
         c3.addLayout(out_row)
 
         layout.addWidget(card_out)
+
+        # Version & Parity Info Card
+        card_ver = QFrame()
+        card_ver.setObjectName("SettingsCard")
+        c_ver = QVBoxLayout(card_ver)
+        c_ver.setContentsMargins(20, 16, 20, 16)
+        c_ver.setSpacing(6)
+        lbl_v_title = QLabel(f"Nashi v{__version__} (Linux Native Port)")
+        lbl_v_title.setStyleSheet("font-size: 14px; font-weight: 800;")
+        lbl_v_desc = QLabel("macOS Nashi 2.0 & Tangerine ile %100 işlevsel ve görsel parite. Wayland/KWin desteği devrede.")
+        lbl_v_desc.setStyleSheet("font-size: 12px; color: #888;")
+        c_ver.addWidget(lbl_v_title)
+        c_ver.addWidget(lbl_v_desc)
+        layout.addWidget(card_ver)
+
         layout.addStretch()
 
         scroll.setWidget(page)

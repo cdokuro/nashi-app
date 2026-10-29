@@ -1595,24 +1595,56 @@ class NashiEngine:
         dest_dir = Path(output_dir).expanduser().resolve() if output_dir else Path.home() / "Downloads"
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        if shutil.which("yt-dlp"):
-            out_tmpl = str(dest_dir / "%(title).80s.%(ext)s")
-            cmd = ["yt-dlp", "--no-playlist", "-o", out_tmpl]
+        # Detect direct static file extension
+        parsed = urllib.parse.urlparse(url)
+        path_lower = parsed.path.lower()
+        direct_exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".bmp", ".mp4", ".mov", ".webm", ".mkv", ".mp3", ".wav", ".m4a", ".flac", ".pdf", ".zip")
+        is_direct_file = any(path_lower.endswith(ext) for ext in direct_exts)
+
+        yt_dlp_bin = shutil.which("yt-dlp") or str(Path.home() / ".local/bin/yt-dlp")
+        has_yt_dlp = os.path.exists(yt_dlp_bin) and os.access(yt_dlp_bin, os.X_OK)
+
+        # Use yt-dlp for all video/audio pages, youtube, social media or when direct file not evident
+        if has_yt_dlp and not is_direct_file:
+            out_tmpl = str(dest_dir / "%(title).80s [%(id).20s].%(ext)s")
+            cmd = [
+                yt_dlp_bin,
+                "--no-playlist",
+                "--no-colors",
+                "--windows-filenames",
+                "--trim-filenames", "160",
+                "-o", out_tmpl,
+            ]
             if mode == "audio":
-                cmd.extend(["-x", "--audio-format", "mp3"])
+                cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
             elif mode == "thumbnail":
                 cmd.extend(["--write-thumbnail", "--skip-download"])
+            else:
+                # Video: merge best mp4/m4a or fallback to best mp4
+                cmd.extend([
+                    "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                    "--merge-output-format", "mp4",
+                ])
             cmd.extend(["--print", "after_move:filepath", url])
-            out = self._run_cmd(cmd, desc="Web media download")
-            lines = [l.strip() for l in out.splitlines() if l.strip() and os.path.exists(l.strip())]
-            if lines:
-                return lines[-1]
+            try:
+                out = self._run_cmd(cmd, desc="yt-dlp media download")
+                lines = [l.strip() for l in out.splitlines() if l.strip() and os.path.exists(l.strip())]
+                if lines:
+                    return lines[-1]
+            except Exception as e:
+                # If yt-dlp fails and user requested video/audio from a streaming site, raise clearly
+                if any(k in url.lower() for k in ["youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "instagram.com", "twitter.com", "x.com"]):
+                    raise RuntimeError(f"Medya indirilemedi ({url}): {e}")
 
-        # Direct HTTP/HTTPS download fallback
-        parsed = urllib.parse.urlparse(url)
+        # Direct HTTP/HTTPS download fallback (only for direct files or when yt-dlp is unavailable)
         fname = os.path.basename(parsed.path) or "downloaded_media"
         if "." not in fname:
-            fname += ".png" if mode == "image" else ".html"
+            if mode == "image":
+                fname += ".png"
+            elif mode == "audio":
+                fname += ".mp3"
+            else:
+                fname += ".mp4"
         target = dest_dir / fname
         counter = 2
         while target.exists():
