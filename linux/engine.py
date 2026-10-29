@@ -1587,6 +1587,55 @@ class NashiEngine:
     # ----------------------------------------------------------------------
     # Web Link Probing & Deep Crawler (IDM / macOS WebDownloadEngine Parity)
     # ----------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Web Link Probing & Deep Crawler (IDM / macOS WebDownloadEngine Parity)
+    # ----------------------------------------------------------------------
+    def _extract_obfuscated_player_stream(self, embed_url: str, parent_referer: str) -> Optional[str]:
+        """Resolves obfuscated custom streaming players (e.g. Rapidrame / HDFilmCehennemi / Playmix)."""
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "Referer": parent_referer,
+            }
+            req = urllib.request.Request(embed_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                embed_html = resp.read().decode("utf-8", errors="ignore")
+
+            # Look for sources: [{file: <variable_name>, type: "hls"}]
+            m = re.search(r'sources:\s*\[\{\s*file:\s*([a-zA-Z0-9_]+)', embed_html)
+            if not m:
+                return None
+            var_name = m.group(1)
+
+            v_idx = embed_html.find(f"var {var_name}")
+            if v_idx == -1:
+                return None
+
+            s_idx = embed_html.rfind("<script", 0, v_idx)
+            e_idx = embed_html.find("</script>", v_idx)
+            js_part = embed_html[s_idx:e_idx]
+            js_part = re.sub(r"<script[^>]*>", "", js_part)
+
+            embed_parsed = urllib.parse.urlparse(embed_url)
+            mock_browser = f"""
+            const location = {{
+                hostname: "{embed_parsed.netloc}",
+                host: "{embed_parsed.netloc}",
+                href: "{embed_url}",
+                protocol: "{embed_parsed.scheme}:"
+            }};
+            const document = {{ location: location }};
+            const window = {{ location: location, document: document }};
+            """
+            full_js = mock_browser + js_part + f"\nconsole.log({var_name});\n"
+            proc = subprocess.run(["node", "-e", full_js], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8)
+            resolved_url = proc.stdout.strip()
+            if resolved_url.startswith("http"):
+                return resolved_url
+        except Exception:
+            pass
+        return None
+
     def inspect_web_link(self, url: str) -> Dict[str, Any]:
         """Probes a web page, streaming site, or direct file URL to extract available media qualities."""
         if not self.is_web_url(url):
@@ -1595,7 +1644,45 @@ class NashiEngine:
         yt_dlp_bin = shutil.which("yt-dlp") or str(Path.home() / ".local/bin/yt-dlp")
         has_yt_dlp = os.path.exists(yt_dlp_bin) and os.access(yt_dlp_bin, os.X_OK)
 
-        # 1. Try yt-dlp JSON dump (covers 1000+ sites, YouTube, Vimeo, Dailymotion, social media, HLS streams)
+        # 1. Deep Crawler: Inspect if this is a streaming/film page with iframe embed player
+        film_headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        film_resolved_stream = None
+        film_title = "Web Filmi / Medyası"
+        film_poster = ""
+        film_referer = url
+
+        try:
+            req_init = urllib.request.Request(url, headers=film_headers)
+            with urllib.request.urlopen(req_init, timeout=12) as resp:
+                top_html = resp.read(512 * 1024).decode("utf-8", errors="ignore")
+                t_m = re.search(r'<title[^>]*>([^<]+)</title>', top_html, re.I)
+                if t_m:
+                    film_title = t_m.group(1).split("—")[0].split("-")[0].strip()
+
+                # Look for iframe embed player
+                iframes = re.findall(r'<iframe[^>]+src=[\"\']([^\"\']+)[\"\']', top_html, re.I)
+                for ifr in iframes:
+                    if ifr.startswith("//"):
+                        ifr = "https:" + ifr
+                    elif ifr.startswith("/"):
+                        ifr = urllib.parse.urljoin(url, ifr)
+                    if any(k in ifr for k in ["embed", "video", "player", "rapid", "mobi", "stream"]):
+                        stream_found = self._extract_obfuscated_player_stream(ifr, parent_referer=url)
+                        if stream_found:
+                            film_resolved_stream = stream_found
+                            film_referer = ifr
+                            break
+        except Exception:
+            pass
+
+        # If a decrypted HLS stream was extracted from the custom player
+        probe_target = film_resolved_stream if film_resolved_stream else url
+        probe_referer = film_referer if film_resolved_stream else url
+
+        # 2. Try yt-dlp JSON dump on the target (covers YouTube, direct HLS streams, Vimeo, etc.)
         if has_yt_dlp:
             cmd = [
                 yt_dlp_bin,
@@ -1604,14 +1691,17 @@ class NashiEngine:
                 "--no-colors",
                 "--no-warnings",
                 "--socket-timeout", "15",
-                url,
+                "--referer", probe_referer,
+                probe_target,
             ]
             try:
                 proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
                 if proc.returncode == 0 and proc.stdout.strip():
                     info = json.loads(proc.stdout)
                     item = info.get("entries", [info])[0] if "entries" in info else info
-                    title = item.get("title") or "Web Medyası"
+                    title = item.get("title") or film_title
+                    if title in ("master", "playlist", "video") and film_title:
+                        title = film_title
                     duration = item.get("duration")
                     thumbnail = item.get("thumbnail") or ""
                     extractor = item.get("extractor_key") or urllib.parse.urlparse(url).netloc
@@ -1640,7 +1730,7 @@ class NashiEngine:
                     format_list = [qualities[h] for h in sorted_heights]
 
                     return {
-                        "url": url,
+                        "url": probe_target,
                         "title": title,
                         "duration": duration,
                         "thumbnail": thumbnail,
@@ -1648,89 +1738,23 @@ class NashiEngine:
                         "kind": "video" if format_list or item.get("vcodec") != "none" else "audio",
                         "formats": format_list,
                         "has_audio": any(f.get("acodec") != "none" for f in raw_formats),
+                        "referer": probe_referer,
                     }
             except Exception:
                 pass
 
-        # 2. Deep Crawler for generic HTML5 video, iframe, and .m3u8 / .mpd playlists
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                content_type = resp.headers.get("Content-Type", "").lower()
-                final_url = resp.geturl()
-
-                # If the URL redirects to a direct media file
-                direct_kind = None
-                for ext in [".mp4", ".mkv", ".webm", ".mov", ".m4v"]:
-                    if final_url.lower().endswith(ext) or ext in content_type:
-                        direct_kind = "video"
-                        break
-                for ext in [".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg"]:
-                    if final_url.lower().endswith(ext) or ext in content_type:
-                        direct_kind = "audio"
-                        break
-
-                if direct_kind:
-                    fname = os.path.basename(urllib.parse.urlparse(final_url).path)
-                    return {
-                        "url": final_url,
-                        "title": fname or "Doğrudan Medya Akışı",
-                        "duration": None,
-                        "thumbnail": "",
-                        "site": urllib.parse.urlparse(final_url).netloc,
-                        "kind": direct_kind,
-                        "formats": [{"format_id": "direct", "height": 0, "ext": "mp4" if direct_kind == "video" else "mp3", "label": "Orijinal Akış"}],
-                        "has_audio": True,
-                    }
-
-                # Scan HTML content for embedded media
-                html_text = resp.read(512 * 1024).decode("utf-8", errors="ignore")
-                
-                # Regex search for .m3u8, .mpd, or video sources
-                m3u8_matches = re.findall(r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', html_text)
-                mp4_matches = re.findall(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', html_text)
-                video_src = re.findall(r'<video[^>]+src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-                iframe_src = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-                title_match = re.search(r'<title[^>]*>([^<]+)</title>', html_text, re.IGNORECASE)
-
-                extracted_title = title_match.group(1).strip() if title_match else "Web Sayfası Medyası"
-                found_stream = None
-                if m3u8_matches:
-                    found_stream = m3u8_matches[0]
-                elif mp4_matches:
-                    found_stream = mp4_matches[0]
-                elif video_src:
-                    found_stream = urllib.parse.urljoin(final_url, video_src[0])
-
-                if found_stream:
-                    return {
-                        "url": found_stream,
-                        "title": extracted_title,
-                        "duration": None,
-                        "thumbnail": "",
-                        "site": urllib.parse.urlparse(url).netloc,
-                        "kind": "video",
-                        "formats": [{"format_id": "best", "height": 0, "ext": "mp4", "label": "Algılanan Video Akışı (En Yüksek)"}],
-                        "has_audio": True,
-                    }
-        except Exception:
-            pass
-
-        # Fallback basic info
+        # 3. Direct file fallback or generic crawler
         parsed = urllib.parse.urlparse(url)
         return {
-            "url": url,
-            "title": os.path.basename(parsed.path) or parsed.netloc,
+            "url": probe_target,
+            "title": film_title or os.path.basename(parsed.path) or parsed.netloc,
             "duration": None,
             "thumbnail": "",
             "site": parsed.netloc,
             "kind": "video",
-            "formats": [{"format_id": "best", "height": 0, "ext": "mp4", "label": "En İyi Kalite"}],
+            "formats": [{"format_id": "best", "height": 0, "ext": "mp4", "label": "En Yüksek Kalite (Otomatik)"}],
             "has_audio": True,
+            "referer": probe_referer,
         }
 
     # ----------------------------------------------------------------------
@@ -1742,7 +1766,8 @@ class NashiEngine:
         mode: str = "video",
         max_height: Optional[int] = None,
         format_id: Optional[str] = None,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        referer: Optional[str] = None,
     ) -> str:
         """Downloads a public media URL or direct image/file into output_dir with targeted quality."""
         if not self.is_web_url(url):
@@ -1760,6 +1785,18 @@ class NashiEngine:
         yt_dlp_bin = shutil.which("yt-dlp") or str(Path.home() / ".local/bin/yt-dlp")
         has_yt_dlp = os.path.exists(yt_dlp_bin) and os.access(yt_dlp_bin, os.X_OK)
 
+        # If URL is an HTML page rather than a direct stream, probe it first to resolve hidden stream
+        active_url = url
+        active_referer = referer or url
+        if not is_direct_file and ("txt/master.txt" not in url and ".m3u8" not in url):
+            try:
+                inspected = self.inspect_web_link(url)
+                if inspected and inspected.get("url") and inspected["url"] != url:
+                    active_url = inspected["url"]
+                    active_referer = inspected.get("referer", active_referer)
+            except Exception:
+                pass
+
         # Use yt-dlp for all video/audio pages, youtube, social media or when direct file not evident
         if has_yt_dlp and not is_direct_file:
             out_tmpl = str(dest_dir / "%(title).80s [%(id).20s].%(ext)s")
@@ -1769,8 +1806,13 @@ class NashiEngine:
                 "--no-colors",
                 "--windows-filenames",
                 "--trim-filenames", "160",
+                "--downloader", "native",
+                "--hls-use-mpegts",
                 "-o", out_tmpl,
             ]
+            if active_referer:
+                cmd.extend(["--referer", active_referer])
+
             if mode == "audio":
                 cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
             elif mode == "thumbnail":
@@ -1788,16 +1830,15 @@ class NashiEngine:
                     "--format", fmt_spec,
                     "--merge-output-format", "mp4",
                 ])
-            cmd.extend(["--print", "after_move:filepath", url])
+            cmd.extend(["--print", "after_move:filepath", active_url])
             try:
                 out = self._run_cmd(cmd, desc="yt-dlp media download")
                 lines = [l.strip() for l in out.splitlines() if l.strip() and os.path.exists(l.strip())]
                 if lines:
                     return lines[-1]
             except Exception as e:
-                # If yt-dlp fails and user requested video/audio from a streaming site, raise clearly
-                if any(k in url.lower() for k in ["youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "instagram.com", "twitter.com", "x.com"]):
-                    raise RuntimeError(f"Medya indirilemedi ({url}): {e}")
+                if any(k in active_url.lower() for k in ["youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "cdn", "hls", "master"]):
+                    raise RuntimeError(f"Medya indirilemedi ({active_url}): {e}")
 
         # Direct HTTP/HTTPS download fallback (only for direct files or when yt-dlp is unavailable)
         fname = os.path.basename(parsed.path) or "downloaded_media"
@@ -1815,7 +1856,7 @@ class NashiEngine:
             target = dest_dir / f"{stem}_{counter}{ext}"
             counter += 1
 
-        req = urllib.request.Request(url, headers={"User-Agent": "Nashi/2.0 (Linux)"})
+        req = urllib.request.Request(active_url, headers={"User-Agent": "Nashi/2.0 (Linux)"})
         with urllib.request.urlopen(req, timeout=15) as resp, open(target, "wb") as f_out:
             shutil.copyfileobj(resp, f_out)
         return str(target)

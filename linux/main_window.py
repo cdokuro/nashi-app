@@ -79,12 +79,14 @@ class ConversionWorker(QThread):
                 dl_dir = self.params.get("output_dir") or self.store.get_preference("download_dir", str(Path.home() / "Downloads"))
                 max_h = self.params.get("max_height")
                 fid = self.params.get("format_id")
+                ref = self.params.get("referer")
                 out_file = self.engine.download_web_link(
                     url,
                     mode=sub_action,
                     max_height=max_h,
                     format_id=fid,
                     output_dir=dl_dir,
+                    referer=ref,
                 )
                 outputs.append(out_file)
                 self.store.add_export(url, out_file, os.path.splitext(out_file)[1], action_title="Web İndirme")
@@ -1180,6 +1182,16 @@ class NashiMainWindow(QMainWindow):
             "max_height": max_height if max_height > 0 else None,
             "format_id": format_id if format_id not in ("best", "direct") else None,
         }
+        # Check if the active dialog resolved an internal stream URL & referer
+        active_dlg = self.findChild(WebDownloadDialog)
+        if active_dlg and active_dlg._current_info:
+            stream_url = active_dlg._current_info.get("url")
+            ref = active_dlg._current_info.get("referer")
+            if stream_url and stream_url.startswith("http"):
+                url = stream_url
+            if ref:
+                params["referer"] = ref
+
         self.toast_hud.show_success("İndirme Başlatıldı", os.path.basename(url) or "Web Medyası", [], 2500)
         self._start_worker("web", item_id, [url], params=params)
 
