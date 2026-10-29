@@ -34,6 +34,7 @@ from artwork import get_theme_palette, NashiArtwork, NashiMarkWidget, FileGarden
 from toast_hud import NashiToastHUD, reveal_in_file_manager, copy_files_to_clipboard
 from float_shelf import FloatShelfWindow
 from editors import CropEditorDialog, ImageEditDialog, MediaTrimDialog
+from web_download_dialog import WebDownloadDialog
 from ipc_and_drag import (
     send_ipc_command,
     ensure_kde_xwayland_eavesdrop,
@@ -75,8 +76,16 @@ class ConversionWorker(QThread):
             if self.item_id.startswith("web:") or (self.files and self.engine.is_web_url(self.files[0])):
                 url = self.files[0]
                 sub_action = self.item_id.split(":", 1)[1] if ":" in self.item_id else "video"
-                dl_dir = self.store.get_preference("download_dir", str(Path.home() / "Downloads"))
-                out_file = self.engine.download_web_link(url, mode=sub_action, output_dir=dl_dir)
+                dl_dir = self.params.get("output_dir") or self.store.get_preference("download_dir", str(Path.home() / "Downloads"))
+                max_h = self.params.get("max_height")
+                fid = self.params.get("format_id")
+                out_file = self.engine.download_web_link(
+                    url,
+                    mode=sub_action,
+                    max_height=max_h,
+                    format_id=fid,
+                    output_dir=dl_dir,
+                )
                 outputs.append(out_file)
                 self.store.add_export(url, out_file, os.path.splitext(out_file)[1], action_title="Web İndirme")
                 self.finished.emit(True, "Harika! Web medyası indirildi.", os.path.basename(out_file), outputs)
@@ -986,7 +995,7 @@ class NashiMainWindow(QMainWindow):
             if not txt:
                 return
             if self.engine.is_web_url(txt):
-                self._start_worker("web", "web:video", [txt])
+                self.prompt_download_link(initial_url=txt)
                 return
             imp_dir = self.store.data_dir / "imports"
             imp_dir.mkdir(parents=True, exist_ok=True)
@@ -1031,7 +1040,8 @@ class NashiMainWindow(QMainWindow):
             if item_id == "web:open":
                 QDesktopServices.openUrl(QUrl(url))
                 return
-            self._start_worker("web", item_id, [url])
+            # Open interactive quality picker modal
+            self.prompt_download_link(initial_url=url)
             return
 
         # Ensure we have files; if none, open file picker first
@@ -1156,18 +1166,22 @@ class NashiMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Link Download & QR Generation Prompts
     # ------------------------------------------------------------------
-    def prompt_download_link(self):
+    def prompt_download_link(self, initial_url: str = ""):
         cb_text = QApplication.clipboard().text().strip()
-        default_url = cb_text if self.engine.is_web_url(cb_text) else ""
-        url, ok = QInputDialog.getText(
-            self,
-            "Bağlantıdan İndir — Nashi",
-            "Video, ses veya görsel bağlantısını (URL) yapıştırın:",
-            QLineEdit.EchoMode.Normal,
-            default_url,
-        )
-        if ok and url.strip():
-            self._start_worker("web", "web:video", [url.strip()])
+        url = initial_url or (cb_text if self.engine.is_web_url(cb_text) else "")
+        dlg = WebDownloadDialog(self.engine, parent=self, initial_url=url)
+        dlg.download_requested.connect(self._on_web_download_requested)
+        dlg.exec()
+
+    def _on_web_download_requested(self, url: str, mode: str, max_height: int, format_id: str, out_dir: str):
+        item_id = f"web:{mode}"
+        params = {
+            "output_dir": out_dir,
+            "max_height": max_height if max_height > 0 else None,
+            "format_id": format_id if format_id not in ("best", "direct") else None,
+        }
+        self.toast_hud.show_success("İndirme Başlatıldı", os.path.basename(url) or "Web Medyası", [], 2500)
+        self._start_worker("web", item_id, [url], params=params)
 
     def prompt_generate_qr(self):
         cb_text = QApplication.clipboard().text().strip()

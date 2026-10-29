@@ -290,6 +290,14 @@ class NashiSmokeTestSuite(unittest.TestCase):
         self.assertTrue(hud.isVisible())
         hud.hide()
 
+    # 8. Web Media Probing & Dialog Test
+    def test_08_web_media_probing(self):
+        info = self.engine.inspect_web_link("https://www.youtube.com/watch?v=jNQXAC9IVRw")
+        self.assertIn("title", info)
+        self.assertIn("formats", info)
+        self.assertTrue(len(info["formats"]) > 0)
+        self.assertEqual(info["kind"], "video")
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(NashiSmokeTestSuite)

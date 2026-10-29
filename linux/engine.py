@@ -1585,10 +1585,166 @@ class NashiEngine:
         return outputs
 
     # ----------------------------------------------------------------------
+    # Web Link Probing & Deep Crawler (IDM / macOS WebDownloadEngine Parity)
+    # ----------------------------------------------------------------------
+    def inspect_web_link(self, url: str) -> Dict[str, Any]:
+        """Probes a web page, streaming site, or direct file URL to extract available media qualities."""
+        if not self.is_web_url(url):
+            raise ValueError(f"Geçersiz bağlantı: {url}")
+
+        yt_dlp_bin = shutil.which("yt-dlp") or str(Path.home() / ".local/bin/yt-dlp")
+        has_yt_dlp = os.path.exists(yt_dlp_bin) and os.access(yt_dlp_bin, os.X_OK)
+
+        # 1. Try yt-dlp JSON dump (covers 1000+ sites, YouTube, Vimeo, Dailymotion, social media, HLS streams)
+        if has_yt_dlp:
+            cmd = [
+                yt_dlp_bin,
+                "-J",
+                "--no-playlist",
+                "--no-colors",
+                "--no-warnings",
+                "--socket-timeout", "15",
+                url,
+            ]
+            try:
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    info = json.loads(proc.stdout)
+                    item = info.get("entries", [info])[0] if "entries" in info else info
+                    title = item.get("title") or "Web Medyası"
+                    duration = item.get("duration")
+                    thumbnail = item.get("thumbnail") or ""
+                    extractor = item.get("extractor_key") or urllib.parse.urlparse(url).netloc
+                    raw_formats = item.get("formats", [])
+
+                    # Parse unique video resolutions
+                    qualities = {}
+                    for f in raw_formats:
+                        h = f.get("height")
+                        fid = f.get("format_id")
+                        ext = f.get("ext", "mp4")
+                        vcodec = f.get("vcodec", "none")
+                        filesize = f.get("filesize") or f.get("filesize_approx")
+                        if h and isinstance(h, int) and h > 0 and vcodec != "none":
+                            label = f"{h}p ({ext.upper()})"
+                            if h not in qualities or (filesize and not qualities[h].get("filesize")):
+                                qualities[h] = {
+                                    "format_id": fid,
+                                    "height": h,
+                                    "ext": ext,
+                                    "label": label,
+                                    "filesize": filesize,
+                                }
+
+                    sorted_heights = sorted(qualities.keys(), reverse=True)
+                    format_list = [qualities[h] for h in sorted_heights]
+
+                    return {
+                        "url": url,
+                        "title": title,
+                        "duration": duration,
+                        "thumbnail": thumbnail,
+                        "site": extractor,
+                        "kind": "video" if format_list or item.get("vcodec") != "none" else "audio",
+                        "formats": format_list,
+                        "has_audio": any(f.get("acodec") != "none" for f in raw_formats),
+                    }
+            except Exception:
+                pass
+
+        # 2. Deep Crawler for generic HTML5 video, iframe, and .m3u8 / .mpd playlists
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                content_type = resp.headers.get("Content-Type", "").lower()
+                final_url = resp.geturl()
+
+                # If the URL redirects to a direct media file
+                direct_kind = None
+                for ext in [".mp4", ".mkv", ".webm", ".mov", ".m4v"]:
+                    if final_url.lower().endswith(ext) or ext in content_type:
+                        direct_kind = "video"
+                        break
+                for ext in [".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg"]:
+                    if final_url.lower().endswith(ext) or ext in content_type:
+                        direct_kind = "audio"
+                        break
+
+                if direct_kind:
+                    fname = os.path.basename(urllib.parse.urlparse(final_url).path)
+                    return {
+                        "url": final_url,
+                        "title": fname or "Doğrudan Medya Akışı",
+                        "duration": None,
+                        "thumbnail": "",
+                        "site": urllib.parse.urlparse(final_url).netloc,
+                        "kind": direct_kind,
+                        "formats": [{"format_id": "direct", "height": 0, "ext": "mp4" if direct_kind == "video" else "mp3", "label": "Orijinal Akış"}],
+                        "has_audio": True,
+                    }
+
+                # Scan HTML content for embedded media
+                html_text = resp.read(512 * 1024).decode("utf-8", errors="ignore")
+                
+                # Regex search for .m3u8, .mpd, or video sources
+                m3u8_matches = re.findall(r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', html_text)
+                mp4_matches = re.findall(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', html_text)
+                video_src = re.findall(r'<video[^>]+src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+                iframe_src = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+                title_match = re.search(r'<title[^>]*>([^<]+)</title>', html_text, re.IGNORECASE)
+
+                extracted_title = title_match.group(1).strip() if title_match else "Web Sayfası Medyası"
+                found_stream = None
+                if m3u8_matches:
+                    found_stream = m3u8_matches[0]
+                elif mp4_matches:
+                    found_stream = mp4_matches[0]
+                elif video_src:
+                    found_stream = urllib.parse.urljoin(final_url, video_src[0])
+
+                if found_stream:
+                    return {
+                        "url": found_stream,
+                        "title": extracted_title,
+                        "duration": None,
+                        "thumbnail": "",
+                        "site": urllib.parse.urlparse(url).netloc,
+                        "kind": "video",
+                        "formats": [{"format_id": "best", "height": 0, "ext": "mp4", "label": "Algılanan Video Akışı (En Yüksek)"}],
+                        "has_audio": True,
+                    }
+        except Exception:
+            pass
+
+        # Fallback basic info
+        parsed = urllib.parse.urlparse(url)
+        return {
+            "url": url,
+            "title": os.path.basename(parsed.path) or parsed.netloc,
+            "duration": None,
+            "thumbnail": "",
+            "site": parsed.netloc,
+            "kind": "video",
+            "formats": [{"format_id": "best", "height": 0, "ext": "mp4", "label": "En İyi Kalite"}],
+            "has_audio": True,
+        }
+
+    # ----------------------------------------------------------------------
     # Web Link Download (yt-dlp / direct HTTP download)
     # ----------------------------------------------------------------------
-    def download_web_link(self, url: str, mode: str = "video", output_dir: Optional[str] = None) -> str:
-        """Downloads a public media URL or direct image/file into output_dir."""
+    def download_web_link(
+        self,
+        url: str,
+        mode: str = "video",
+        max_height: Optional[int] = None,
+        format_id: Optional[str] = None,
+        output_dir: Optional[str] = None
+    ) -> str:
+        """Downloads a public media URL or direct image/file into output_dir with targeted quality."""
         if not self.is_web_url(url):
             raise ValueError(f"Geçersiz bağlantı: {url}")
 
@@ -1620,9 +1776,16 @@ class NashiEngine:
             elif mode == "thumbnail":
                 cmd.extend(["--write-thumbnail", "--skip-download"])
             else:
-                # Video: merge best mp4/m4a or fallback to best mp4
+                # Video: check if specific format_id or max_height is requested
+                if format_id and format_id not in ("best", "direct"):
+                    fmt_spec = f"{format_id}+bestaudio/best"
+                elif max_height and max_height > 0:
+                    fmt_spec = f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={max_height}][ext=mp4]/bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"
+                else:
+                    fmt_spec = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+
                 cmd.extend([
-                    "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                    "--format", fmt_spec,
                     "--merge-output-format", "mp4",
                 ])
             cmd.extend(["--print", "after_move:filepath", url])
