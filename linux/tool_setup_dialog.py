@@ -5,16 +5,16 @@ Provides first-time tool discovery, status checks, and automated setup for Media
 """
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QFrame, QScrollArea, QWidget
+    QProgressBar, QFrame, QScrollArea, QWidget, QApplication
 )
 
 from artwork import get_theme_palette
@@ -22,41 +22,80 @@ from store import get_store
 
 
 class ToolInstallWorker(QThread):
-    """Background installation thread that downloads/configures missing tools."""
+    """Background installation thread that downloads, tests, and verifies tools."""
     progress_changed = Signal(str, int)  # (status_message, percent)
     finished = Signal(bool, str)
 
-    def __init__(self, target_group: str):
+    def __init__(self, target_group: str, engine=None):
         super().__init__()
-        self.target_group = target_group  # 'media' or 'office'
+        self.target_group = target_group  # 'media', 'office_verify', 'office_flatpak_install'
+        self.engine = engine
 
     def run(self):
         try:
             if self.target_group == "media":
-                self.progress_changed.emit("yt-dlp kontrol ediliyor ve güncelleniyor…", 30)
-                # Ensure yt-dlp is installed in ~/.local/bin
-                bin_dir = Path.home() / ".local" / "bin"
-                bin_dir.mkdir(parents=True, exist_ok=True)
-                yt_bin = bin_dir / "yt-dlp"
-                if not yt_bin.exists():
+                self.progress_changed.emit("FFmpeg ve ffprobe çalıştırılıp test ediliyor…", 30)
+                res = self.engine.verify_media_tools() if self.engine else {}
+
+                if not res.get("ytdlp"):
+                    self.progress_changed.emit("yt-dlp indiriliyor ve ~/.local/bin dizinine kuruluyor…", 60)
+                    bin_dir = Path.home() / ".local" / "bin"
+                    bin_dir.mkdir(parents=True, exist_ok=True)
+                    yt_bin = bin_dir / "yt-dlp"
                     cmd = ["curl", "-sL", "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp", "-o", str(yt_bin)]
-                    subprocess.run(cmd, check=True)
+                    subprocess.run(cmd, check=True, timeout=30)
                     yt_bin.chmod(0o755)
+                    res = self.engine.verify_media_tools() if self.engine else {}
 
-                self.progress_changed.emit("Medya araçları (FFmpeg & yt-dlp) hazır!", 100)
-                self.finished.emit(True, "Medya araçları başarıyla kuruldu.")
-
-            elif self.target_group == "office":
-                self.progress_changed.emit("LibreOffice ortamı taranıyor…", 50)
-                # Check if soffice or libreoffice exists on path
-                if shutil.which("soffice") or shutil.which("libreoffice"):
-                    self.progress_changed.emit("LibreOffice zaten sisteminizde kurulu!", 100)
-                    self.finished.emit(True, "Ofis araçları kullanıma hazır.")
+                if res.get("all_ready"):
+                    ff_v = res.get("ffmpeg_version", "FFmpeg")
+                    yt_v = res.get("ytdlp_version", "yt-dlp")
+                    self.progress_changed.emit("✓ Tüm medya araçları başarıyla doğrulandı!", 100)
+                    self.finished.emit(True, f"Medya araçları doğrulandı: {ff_v} · {yt_v}")
                 else:
-                    self.progress_changed.emit("LibreOffice sistem paket yöneticinizden kurulabilir (sudo pacman -S libreoffice-fresh)", 100)
-                    self.finished.emit(True, "Ofis paketi kurulum bilgisi hazırlandı.")
+                    missing = []
+                    if not res.get("ffmpeg"):
+                        missing.append("FFmpeg")
+                    if not res.get("ytdlp"):
+                        missing.append("yt-dlp")
+                    self.finished.emit(False, f"Eksik medya araçları: {', '.join(missing)}. Lütfen paket yöneticinizden kurun.")
+
+            elif self.target_group in ("office", "office_verify"):
+                self.progress_changed.emit("Sistem taranıyor (PATH, Flatpak, Snap, ~/.local/bin)…", 40)
+                office_cmd = self.engine.find_office_command() if self.engine else None
+                office_ver = self.engine.get_office_version() if self.engine else None
+
+                if office_cmd and office_ver:
+                    self.progress_changed.emit(f"✓ LibreOffice tespit edildi: {office_ver}", 100)
+                    self.finished.emit(True, f"✓ Ofis araçları kullanıma hazır ({office_ver})")
+                else:
+                    self.progress_changed.emit("LibreOffice bulunamadı.", 100)
+                    self.finished.emit(
+                        False,
+                        "Sisteminizde LibreOffice bulunamadı. Lütfen aşağıdaki seçeneklerden birini kullanarak kurun."
+                    )
+
+            elif self.target_group == "office_flatpak_install":
+                self.progress_changed.emit("Flatpak ile LibreOffice hazırlanıyor…", 15)
+                cmd = ["flatpak", "--user", "install", "-y", "flathub", "org.libreoffice.LibreOffice"]
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+                for line in proc.stdout:
+                    line = line.strip()
+                    m = re.search(r"(\d+)%", line)
+                    if m:
+                        pct = int(m.group(1))
+                        self.progress_changed.emit(f"LibreOffice indiriliyor: %{pct}", pct)
+
+                proc.wait()
+                office_ver = self.engine.get_office_version() if self.engine else None
+                if office_ver or proc.returncode == 0:
+                    self.progress_changed.emit("✓ LibreOffice başarıyla kuruldu!", 100)
+                    self.finished.emit(True, f"LibreOffice başarıyla kuruldu: {office_ver or '26.8'}")
+                else:
+                    self.finished.emit(False, "Flatpak kurulumu tamamlanamadı. Lütfen terminalden pacman deneyin.")
         except Exception as e:
-            self.finished.emit(False, str(e))
+            self.finished.emit(False, f"İşlem sırasında hata: {e}")
 
 
 class ToolSetupDialog(QDialog):
@@ -70,7 +109,7 @@ class ToolSetupDialog(QDialog):
         self._worker: Optional[ToolInstallWorker] = None
 
         self.setWindowTitle("Nashi Araç Kurulumu (Tool Setup)")
-        self.setMinimumSize(580, 520)
+        self.setMinimumSize(600, 560)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         self._init_ui()
@@ -132,7 +171,7 @@ class ToolSetupDialog(QDialog):
         lbl_m_desc.setStyleSheet("font-size: 12px; color: #888;")
         m_box.addWidget(lbl_m_desc)
 
-        self.btn_install_media = QPushButton("Medya Araçlarını Kur / Güncelle")
+        self.btn_install_media = QPushButton("Medya Araçlarını Doğrula / Yeniden Test Et")
         self.btn_install_media.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_install_media.clicked.connect(lambda: self._start_install("media"))
         m_box.addWidget(self.btn_install_media, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -165,10 +204,50 @@ class ToolSetupDialog(QDialog):
         lbl_o_desc.setStyleSheet("font-size: 12px; color: #888;")
         o_box.addWidget(lbl_o_desc)
 
-        self.btn_install_office = QPushButton("Ofis Araçlarını Doğrula")
+        o_btn_row = QHBoxLayout()
+        self.btn_install_office = QPushButton("Ofis Kurulumunu Doğrula")
         self.btn_install_office.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_install_office.clicked.connect(lambda: self._start_install("office"))
-        o_box.addWidget(self.btn_install_office, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.btn_install_office.clicked.connect(lambda: self._start_install("office_verify"))
+        o_btn_row.addWidget(self.btn_install_office)
+        o_btn_row.addStretch()
+        o_box.addLayout(o_btn_row)
+
+        # Office Helper Actions Frame (visible when office is not installed)
+        self.office_actions_frame = QFrame()
+        self.office_actions_frame.setObjectName("HelperCard")
+        oa_box = QVBoxLayout(self.office_actions_frame)
+        oa_box.setContentsMargins(14, 12, 14, 12)
+        oa_box.setSpacing(8)
+
+        lbl_helper_title = QLabel("KURULUM SEÇENEKLERİ:")
+        lbl_helper_title.setStyleSheet("font-size: 11px; font-weight: 800; color: #E5A93C; letter-spacing: 0.5px;")
+        oa_box.addWidget(lbl_helper_title)
+
+        # Pacman Option
+        pacman_row = QHBoxLayout()
+        lbl_p_info = QLabel("Arch Linux (Tavsiye Edilen):")
+        lbl_p_info.setStyleSheet("font-size: 12px; font-weight: 600;")
+        pacman_row.addWidget(lbl_p_info)
+        self.btn_copy_pacman = QPushButton("📋 sudo pacman -S libreoffice-fresh Kopyala")
+        self.btn_copy_pacman.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy_pacman.clicked.connect(self._copy_pacman_command)
+        pacman_row.addWidget(self.btn_copy_pacman)
+        pacman_row.addStretch()
+        oa_box.addLayout(pacman_row)
+
+        # Flatpak Option
+        flatpak_row = QHBoxLayout()
+        lbl_f_info = QLabel("Flatpak (Şifresiz Kullanıcı Kurulumu):")
+        lbl_f_info.setStyleSheet("font-size: 12px; font-weight: 600;")
+        flatpak_row.addWidget(lbl_f_info)
+        self.btn_flatpak_install = QPushButton("📦 Flatpak ile Otomatik İndir ve Kur")
+        self.btn_flatpak_install.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_flatpak_install.clicked.connect(lambda: self._start_install("office_flatpak_install"))
+        flatpak_row.addWidget(self.btn_flatpak_install)
+        flatpak_row.addStretch()
+        oa_box.addLayout(flatpak_row)
+
+        o_box.addWidget(self.office_actions_frame)
         c_layout.addWidget(self.card_office)
 
         scroll.setWidget(container)
@@ -184,6 +263,7 @@ class ToolSetupDialog(QDialog):
 
         self.lbl_action_status = QLabel("Tüm araçlar kontrol ediliyor…")
         self.lbl_action_status.setStyleSheet("font-size: 12px; color: #888;")
+        self.lbl_action_status.setWordWrap(True)
         root.addWidget(self.lbl_action_status)
 
         # Footer Buttons
@@ -224,6 +304,12 @@ class ToolSetupDialog(QDialog):
                 border: 1px solid {pal['line']};
                 border-radius: 16px;
             }}
+            QFrame#HelperCard {{
+                background-color: {pal['inset']};
+                border: 1px dashed {pal['gold']};
+                border-radius: 12px;
+                margin-top: 6px;
+            }}
             QPushButton {{
                 background-color: {pal['inset']};
                 color: {pal['ink']};
@@ -255,45 +341,70 @@ class ToolSetupDialog(QDialog):
             }}
         """)
 
-    def refresh_status(self):
-        # 1. Media tools check
-        has_ffmpeg = bool(shutil.which("ffmpeg"))
-        has_ytdlp = bool(shutil.which("yt-dlp") or (Path.home() / ".local/bin/yt-dlp").exists())
+    def _copy_pacman_command(self):
+        cb = QApplication.clipboard()
+        if cb:
+            cb.setText("sudo pacman -S --noconfirm libreoffice-fresh")
+            self.btn_copy_pacman.setText("✓ Komut Kopyalandı!")
+            self.lbl_action_status.setText(
+                "✓ Komut panoya kopyalandı! Terminali açıp yapıştırabilirsiniz: sudo pacman -S libreoffice-fresh"
+            )
+            QTimer.singleShot(3000, lambda: self.btn_copy_pacman.setText("📋 sudo pacman -S libreoffice-fresh Kopyala"))
 
-        if has_ffmpeg and has_ytdlp:
-            self.lbl_m_status.setText("✓ Bilgisayarınızda Hazır")
+    def refresh_status(self, custom_msg: Optional[str] = None):
+        # 1. Media tools check
+        media_res = self.engine.verify_media_tools() if self.engine else {}
+        has_media = media_res.get("all_ready", False)
+
+        if has_media:
+            ff_part = media_res.get("ffmpeg_version", "FFmpeg").replace("ffmpeg version ", "")
+            yt_part = media_res.get("ytdlp_version", "yt-dlp").replace("yt-dlp ", "")
+            ff_tag = ff_part.split()[0] if ff_part else "Hazır"
+            self.lbl_m_status.setText(f"✓ Bilgisayarınızda Hazır ({ff_tag} · yt-dlp)")
             self.lbl_m_status.setStyleSheet("color: #4CAF50; font-weight: 700; font-size: 12px;")
-            self.btn_install_media.setText("✓ Hazır")
-            self.btn_install_media.setEnabled(False)
+            self.btn_install_media.setText("✓ Doğrulandı (Yeniden Test Et)")
+            self.btn_install_media.setEnabled(True)
         else:
             self.lbl_m_status.setText("Eksik")
             self.lbl_m_status.setStyleSheet("color: #FF9800; font-weight: 700; font-size: 12px;")
-            self.btn_install_media.setText("Medya Araçlarını İndir")
+            self.btn_install_media.setText("Medya Araçlarını İndir / Doğrula")
             self.btn_install_media.setEnabled(True)
 
         # 2. Office tools check
-        has_office = bool(shutil.which("soffice") or shutil.which("libreoffice"))
+        office_ver = self.engine.get_office_version() if self.engine else None
+        has_office = bool(office_ver)
+
         if has_office:
-            self.lbl_o_status.setText("✓ Bilgisayarınızda Hazır")
+            parts = office_ver.split()
+            v_short = f"{parts[0]} {parts[1]}" if len(parts) > 1 else office_ver
+            self.lbl_o_status.setText(f"✓ Bilgisayarınızda Hazır ({v_short})")
             self.lbl_o_status.setStyleSheet("color: #4CAF50; font-weight: 700; font-size: 12px;")
-            self.btn_install_office.setText("✓ Hazır")
-            self.btn_install_office.setEnabled(False)
+            self.btn_install_office.setText("✓ Doğrulandı (Yeniden Doğrula)")
+            self.btn_install_office.setEnabled(True)
+            self.office_actions_frame.hide()
         else:
             self.lbl_o_status.setText("Kurulum Gerekli")
-            self.lbl_o_status.setStyleSheet("color: #888; font-weight: 600; font-size: 12px;")
+            self.lbl_o_status.setStyleSheet("color: #FF9800; font-weight: 700; font-size: 12px;")
             self.btn_install_office.setText("Ofis Kurulumunu Doğrula")
             self.btn_install_office.setEnabled(True)
+            self.office_actions_frame.show()
 
-        if has_ffmpeg and has_ytdlp and has_office:
+        if custom_msg:
+            self.lbl_action_status.setText(custom_msg)
+        elif has_media and has_office:
             self.lbl_action_status.setText("Harika! Tüm Nashi araçları hazır ve tam yetenekle çalışıyor.")
+        elif not has_office:
+            self.lbl_action_status.setText("LibreOffice henüz kurulu değil. Seçeneklerden birini uygulayıp 'Doğrula'ya basabilirsiniz.")
         else:
             self.lbl_action_status.setText("Eksik araçları hazırlayarak tüm dönüştürme ve web yeteneklerini açın.")
 
     def _start_install(self, group: str):
         self.progress.show()
-        self.progress.setValue(10)
+        self.progress.setValue(15)
         self.btn_done.setEnabled(False)
-        self._worker = ToolInstallWorker(group)
+        self.lbl_action_status.setText("İşlem başlatılıyor…")
+
+        self._worker = ToolInstallWorker(group, engine=self.engine)
         self._worker.progress_changed.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
         self._worker.start()
@@ -305,7 +416,10 @@ class ToolSetupDialog(QDialog):
 
     @Slot(bool, str)
     def _on_finished(self, success: bool, msg: str):
-        self.progress.hide()
         self.btn_done.setEnabled(True)
-        self.lbl_action_status.setText(msg)
-        self.refresh_status()
+        self.refresh_status(custom_msg=msg)
+        if success:
+            self.progress.setValue(100)
+            QTimer.singleShot(1500, self.progress.hide)
+        else:
+            self.progress.hide()

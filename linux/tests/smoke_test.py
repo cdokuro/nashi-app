@@ -353,6 +353,51 @@ class NashiSmokeTestSuite(unittest.TestCase):
         self.assertFalse(ctrl._opened)
         self.assertTrue(len(released_called) > 0)
 
+    # 12. Tool Setup & Office/Media Verification (v0.3.3)
+    def test_12_tool_setup_and_office_media_verification(self):
+        from tool_setup_dialog import ToolSetupDialog, ToolInstallWorker
+        from PySide6.QtWidgets import QApplication
+
+        # 1. Media tools verification
+        media_res = self.engine.verify_media_tools()
+        self.assertTrue(media_res["all_ready"])
+        self.assertTrue(media_res["ffmpeg"])
+        self.assertTrue(media_res["ytdlp"])
+        self.assertIn("FFmpeg", media_res["ffmpeg_version"])
+
+        # 2. Office tools discovery
+        office_cmd = self.engine.find_office_command()
+        # Either None (if not installed yet) or list of strings
+        if office_cmd:
+            self.assertIsInstance(office_cmd, list)
+
+        # 3. ToolSetupDialog UI initialization and action handling
+        dlg = ToolSetupDialog(engine=self.engine)
+        self.assertIn("Hazır", dlg.lbl_m_status.text())
+
+        # Test pacman clipboard copy
+        dlg._copy_pacman_command()
+        cb = QApplication.clipboard()
+        self.assertIn("libreoffice-fresh", cb.text())
+        self.assertIn("Kopyalandı", dlg.btn_copy_pacman.text())
+
+        # Test ToolInstallWorker media verification
+        worker_m = ToolInstallWorker("media", engine=self.engine)
+        fin_res = []
+        worker_m.finished.connect(lambda s, m: fin_res.append((s, m)))
+        worker_m.run()  # run synchronously for test
+        self.assertTrue(len(fin_res) > 0)
+        self.assertTrue(fin_res[0][0])
+        self.assertIn("FFmpeg", fin_res[0][1])
+
+        # Test ToolInstallWorker office verification
+        worker_o = ToolInstallWorker("office_verify", engine=self.engine)
+        fin_o = []
+        worker_o.finished.connect(lambda s, m: fin_o.append((s, m)))
+        worker_o.run()
+        self.assertTrue(len(fin_o) > 0)
+        dlg.close()
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(NashiSmokeTestSuite)

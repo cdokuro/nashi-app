@@ -1424,11 +1424,172 @@ class NashiEngine:
 
         raise NotImplementedError(f"Tabular conversion {src_ext} -> {tgt_ext} not supported.")
 
+    # ----------------------------------------------------------------------
+    # Office & Media Tool Discovery & Execution (Parity with macOS/Windows)
+    # ----------------------------------------------------------------------
+    def verify_media_tools(self) -> Dict[str, Any]:
+        """
+        Thoroughly tests ffmpeg, ffprobe, and yt-dlp by executing them and getting version headers.
+        """
+        results = {
+            "ffmpeg": False,
+            "ffmpeg_version": "",
+            "ffprobe": False,
+            "ffprobe_version": "",
+            "ytdlp": False,
+            "ytdlp_version": "",
+            "all_ready": False,
+        }
+
+        # 1. FFmpeg
+        ff_bin = shutil.which("ffmpeg")
+        if ff_bin:
+            try:
+                res = subprocess.run([ff_bin, "-version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=4)
+                if res.returncode == 0:
+                    results["ffmpeg"] = True
+                    first_line = res.stdout.strip().splitlines()[0]
+                    v_part = first_line.split("Copyright")[0].strip()
+                    results["ffmpeg_version"] = f"FFmpeg ({v_part})"
+            except Exception:
+                pass
+
+        # 2. ffprobe
+        probe_bin = shutil.which("ffprobe")
+        if probe_bin:
+            try:
+                res = subprocess.run([probe_bin, "-version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=4)
+                if res.returncode == 0:
+                    results["ffprobe"] = True
+                    first_line = res.stdout.strip().splitlines()[0]
+                    v_part = first_line.split("Copyright")[0].strip()
+                    results["ffprobe_version"] = f"ffprobe ({v_part})"
+            except Exception:
+                pass
+
+        # 3. yt-dlp
+        yt_candidates = [
+            shutil.which("yt-dlp"),
+            str(Path.home() / ".local/bin/yt-dlp"),
+            "/usr/bin/yt-dlp",
+            "/usr/local/bin/yt-dlp",
+        ]
+        for yt_bin in yt_candidates:
+            if yt_bin and os.path.exists(yt_bin) and os.access(yt_bin, os.X_OK):
+                try:
+                    res = subprocess.run([yt_bin, "--version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=4)
+                    if res.returncode == 0:
+                        results["ytdlp"] = True
+                        results["ytdlp_version"] = f"yt-dlp {res.stdout.strip()}"
+                        break
+                except Exception:
+                    pass
+
+        results["all_ready"] = bool(results["ffmpeg"] and results["ytdlp"])
+        return results
+
+    def find_office_command(self) -> Optional[List[str]]:
+        """
+        Returns the command list to run LibreOffice / soffice, or None if not installed.
+        Checks:
+        1. PATH: 'soffice', 'libreoffice'
+        2. ~/.local/bin/soffice
+        3. Flatpak: org.libreoffice.LibreOffice (user or system)
+        4. Snap: /snap/bin/libreoffice
+        """
+        for bin_name in ("soffice", "libreoffice"):
+            p = shutil.which(bin_name)
+            if p:
+                return [p]
+
+        user_local = Path.home() / ".local" / "bin" / "soffice"
+        if user_local.exists() and os.access(user_local, os.X_OK):
+            return [str(user_local)]
+
+        # Check flatpak
+        if shutil.which("flatpak"):
+            for mode in ("--user", "--system"):
+                try:
+                    res = subprocess.run(
+                        ["flatpak", mode, "info", "org.libreoffice.LibreOffice"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=3,
+                    )
+                    if res.returncode == 0:
+                        return ["flatpak", "run", "org.libreoffice.LibreOffice"]
+                except Exception:
+                    pass
+
+        # Check snap
+        snap_lo = Path("/snap/bin/libreoffice")
+        if snap_lo.exists() and os.access(snap_lo, os.X_OK):
+            return [str(snap_lo)]
+
+        return None
+
+    def get_office_version(self) -> Optional[str]:
+        """Returns the version string of the installed LibreOffice, or None."""
+        cmd = self.find_office_command()
+        if not cmd:
+            return None
+        try:
+            res = subprocess.run(cmd + ["--version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=6)
+            if res.returncode == 0:
+                line = res.stdout.strip().splitlines()[0]
+                return line
+        except Exception:
+            pass
+        return None
+
+    def _convert_office_with_libreoffice(self, input_path: str, output_path: str, tgt_format: str, office_cmd: List[str]) -> str:
+        """Converts office documents using headless LibreOffice matching upstream OfficeDocuments.cs."""
+        with tempfile.TemporaryDirectory(prefix="nashi_office_") as tmpdir:
+            profile_dir = Path(tmpdir) / "profile"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            out_dir = Path(tmpdir) / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            cmd = list(office_cmd)
+            cmd.extend([
+                f"-env:UserInstallation=file://{profile_dir.resolve()}",
+                "--headless",
+                "--nologo",
+                "--nodefault",
+                "--nolockcheck",
+                "--nofirststartwizard",
+                "--norestore",
+                "--convert-to", tgt_format,
+                "--outdir", str(out_dir),
+                str(Path(input_path).resolve())
+            ])
+            self._run_cmd(cmd, desc=f"Office conversion to {tgt_format.upper()}")
+
+            generated = list(out_dir.glob(f"*.{tgt_format}"))
+            if not generated:
+                generated = list(out_dir.iterdir())
+            if not generated or not generated[0].exists():
+                raise RuntimeError(f"LibreOffice çıktı dosyası üretemedi: {tgt_format}")
+
+            shutil.move(str(generated[0]), output_path)
+            return output_path
+
     def _convert_document(self, input_path: str, output_path: str, src_ext: str, tgt_ext: str) -> str:
-        """Converts Markdown, Text, HTML, and PDF documents."""
+        """Converts Markdown, Text, HTML, Office and PDF documents."""
         # HTML to PDF conversion (New in v0.7.13 / v0.3.0)
         if src_ext in ("html", "htm") and tgt_ext == "pdf":
             return self.convert_html_to_pdf(input_path, output_path)
+
+        # Office formats (DOCX, PPTX, XLSX, ODT, ODS, ODP) -> PDF / Text / HTML
+        office_formats = {"docx", "doc", "pptx", "ppt", "xlsx", "xls", "odt", "ods", "odp"}
+        if src_ext in office_formats or (tgt_ext in office_formats and src_ext not in ("txt", "md")):
+            office_cmd = self.find_office_command()
+            if not office_cmd:
+                raise RuntimeError(
+                    f"'{src_ext.upper()}' belgelerini dönüştürmek için LibreOffice gereklidir. "
+                    "Lütfen Araç Kurulumu (Tool Setup) penceresinden LibreOffice kurulumunu tamamlayın."
+                )
+            return self._convert_office_with_libreoffice(input_path, output_path, tgt_ext, office_cmd)
 
         if src_ext == "pdf" and tgt_ext in ("txt", "md", "html"):
             if shutil.which("pdftotext"):
