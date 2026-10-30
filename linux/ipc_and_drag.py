@@ -28,8 +28,6 @@ def get_ipc_socket_path() -> str:
 def send_ipc_command(cmd: str, mode: str = "", files: Optional[list] = None, timeout_ms: int = 800) -> bool:
     """Sends a JSON command to an already-running Nashi instance. Returns True if delivered."""
     sock_path = get_ipc_socket_path()
-    if not os.path.exists(sock_path):
-        return False
 
     payload = json.dumps({
         "cmd": cmd,
@@ -37,14 +35,30 @@ def send_ipc_command(cmd: str, mode: str = "", files: Optional[list] = None, tim
         "files": files or [],
     }).encode("utf-8")
 
+    # Try Qt QLocalSocket first
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(timeout_ms / 1000.0)
-            s.connect(sock_path)
-            s.sendall(payload)
-        return True
+        from PySide6.QtNetwork import QLocalSocket
+        sock = QLocalSocket()
+        sock.connectToServer(sock_path)
+        if sock.waitForConnected(timeout_ms):
+            sock.write(payload)
+            sock.waitForBytesWritten(500)
+            sock.disconnectFromServer()
+            return True
     except Exception:
-        return False
+        pass
+
+    # Fallback to standard Python AF_UNIX socket
+    if os.path.exists(sock_path):
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout_ms / 1000.0)
+                s.connect(sock_path)
+                s.sendall(payload)
+            return True
+        except Exception:
+            pass
+    return False
 
 
 def ensure_kde_xwayland_eavesdrop():
@@ -421,6 +435,9 @@ class NashiIPCServer(QObject):
         self.dbus_bridge.cursor_updated.connect(self.cursor_updated)
 
     def start(self) -> bool:
+        self.server.close()
+        QLocalServer.removeServer(self.sock_path)
+        QLocalServer.removeServer("nashi-ipc")
         if os.path.exists(self.sock_path):
             try:
                 os.unlink(self.sock_path)
