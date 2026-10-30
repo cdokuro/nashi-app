@@ -1826,6 +1826,7 @@ class NashiEngine:
         format_id: Optional[str] = None,
         output_dir: Optional[str] = None,
         referer: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> str:
         """Downloads a public media URL or direct image/file into output_dir with targeted quality."""
         if not self.is_web_url(url):
@@ -1862,6 +1863,8 @@ class NashiEngine:
                 yt_dlp_bin,
                 "--no-playlist",
                 "--no-colors",
+                "--newline",
+                "--progress-template", "download:NASHI_PROGRESS:%(progress._percent_str)s",
                 "--windows-filenames",
                 "--trim-filenames", "160",
                 "--downloader", "native",
@@ -1890,7 +1893,28 @@ class NashiEngine:
                 ])
             cmd.extend(["--print", "after_move:filepath", active_url])
             try:
-                out = self._run_cmd(cmd, desc="yt-dlp media download")
+                # If progress_callback provided, stream stdout lines to parse NASHI_PROGRESS
+                if progress_callback:
+                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    out_lines = []
+                    while True:
+                        line = p.stdout.readline()
+                        if not line and p.poll() is not None:
+                            break
+                        if line:
+                            out_lines.append(line)
+                            if "NASHI_PROGRESS:" in line:
+                                try:
+                                    raw_pct = line.split("NASHI_PROGRESS:")[1].strip().replace("%", "")
+                                    pct_val = int(float(raw_pct))
+                                    progress_callback(pct_val, f"İndiriliyor: %{pct_val}")
+                                except Exception:
+                                    pass
+                    p.wait()
+                    out = "".join(out_lines)
+                else:
+                    out = self._run_cmd(cmd, desc="yt-dlp media download")
+
                 lines = [l.strip() for l in out.splitlines() if l.strip() and os.path.exists(l.strip())]
                 if lines:
                     return lines[-1]

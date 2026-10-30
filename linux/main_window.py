@@ -35,6 +35,7 @@ from toast_hud import NashiToastHUD, reveal_in_file_manager, copy_files_to_clipb
 from float_shelf import FloatShelfWindow
 from editors import CropEditorDialog, ImageEditDialog, MediaTrimDialog
 from web_download_dialog import WebDownloadDialog
+from tool_setup_dialog import ToolSetupDialog
 from ipc_and_drag import (
     send_ipc_command,
     ensure_kde_xwayland_eavesdrop,
@@ -47,6 +48,7 @@ from ipc_and_drag import (
 class ConversionWorker(QThread):
     """Background worker executing file conversions, 27 tools, and web downloads."""
 
+    progress_updated = Signal(str, str, int)  # (title, detail, percent)
     finished = Signal(bool, str, str, list)  # (success, title, detail, output_paths)
 
     def __init__(
@@ -87,6 +89,7 @@ class ConversionWorker(QThread):
                     format_id=fid,
                     output_dir=dl_dir,
                     referer=ref,
+                    progress_callback=lambda pct, msg: self.progress_updated.emit("Web İndiriliyor…", msg, pct),
                 )
                 outputs.append(out_file)
                 self.store.add_export(url, out_file, os.path.splitext(out_file)[1], action_title="Web İndirme")
@@ -720,13 +723,20 @@ class NashiMainWindow(QMainWindow):
         card_ver.setObjectName("SettingsCard")
         c_ver = QVBoxLayout(card_ver)
         c_ver.setContentsMargins(20, 16, 20, 16)
-        c_ver.setSpacing(6)
+        c_ver.setSpacing(10)
         lbl_v_title = QLabel(f"Nashi v{__version__} (Linux Native Port)")
         lbl_v_title.setStyleSheet("font-size: 14px; font-weight: 800;")
         lbl_v_desc = QLabel("macOS Nashi 2.0 & Tangerine ile %100 işlevsel ve görsel parite. Wayland/KWin desteği devrede.")
         lbl_v_desc.setStyleSheet("font-size: 12px; color: #888;")
         c_ver.addWidget(lbl_v_title)
         c_ver.addWidget(lbl_v_desc)
+
+        btn_tools = QPushButton("🛠️ Araç Kurulumu & Bağımlılıklar (Tool Setup)…")
+        btn_tools.setObjectName("SecondaryCardBtn")
+        btn_tools.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_tools.clicked.connect(self.prompt_tool_setup)
+        c_ver.addWidget(btn_tools, alignment=Qt.AlignmentFlag.AlignLeft)
+
         layout.addWidget(card_ver)
 
         layout.addStretch()
@@ -1152,6 +1162,9 @@ class NashiMainWindow(QMainWindow):
             files=files,
             params=params,
         )
+        self._active_worker.progress_updated.connect(
+            lambda title, detail, pct: self.toast_hud.show_progress(title, detail, percent=pct)
+        )
         self._active_worker.finished.connect(self._on_worker_finished)
         self._active_worker.start()
 
@@ -1164,6 +1177,10 @@ class NashiMainWindow(QMainWindow):
             self._refresh_recent_exports()
         else:
             self.toast_hud.show_error(title, detail, duration_ms=5200)
+
+    def prompt_tool_setup(self):
+        dlg = ToolSetupDialog(self.engine, parent=self)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Link Download & QR Generation Prompts

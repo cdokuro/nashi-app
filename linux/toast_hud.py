@@ -191,13 +191,21 @@ class NashiToastHUD(QWidget):
             y = avail.y() + avail.height() - self.height() - 32
             self.move(x, y)
 
-    def show_progress(self, title: str, detail: str = "Lütfen bekleyin…"):
+    def show_progress(self, title: str, detail: str = "Lütfen bekleyin…", percent: Optional[int] = None):
         self._dismiss_timer.stop()
         self._fading_out = False
         self._files = []
         self.mascot.set_happy(False)
         self.lbl_title.setText(title)
-        self.lbl_detail.setText(detail)
+        
+        if percent is not None and 0 <= percent <= 100:
+            self.lbl_detail.setText(f"{detail} (%{percent})")
+            self.progress.setRange(0, 100)
+            self.progress.setValue(percent)
+        else:
+            self.lbl_detail.setText(detail)
+            self.progress.setRange(0, 0)
+
         self.progress.show()
         self.btn_copy.hide()
         self.btn_reveal.hide()
