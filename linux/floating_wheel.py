@@ -10,7 +10,7 @@ Ported from Wheel.swift and GlobalDragController.cs (GlobalDropWheel):
 import os
 from pathlib import Path
 from typing import List, Optional, Tuple
-from PySide6.QtCore import Qt, QPoint, QPointF, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, QTimer, Signal, QEvent
 from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
 
@@ -52,6 +52,7 @@ class FloatingRadialWheel(QWidget):
 
         self._base_diameter = 350
         self.setFixedSize(self._base_diameter, self._base_diameter)
+        self._filter_installed: bool = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -59,7 +60,7 @@ class FloatingRadialWheel(QWidget):
         self.wheel = RadialWheelWidget(parent=self)
         self.wheel.item_chosen.connect(self._on_item_chosen)
         self.wheel.mode_switch_requested.connect(self.switch_mode)
-        self.wheel.cancelled.connect(self.hide)
+        self.wheel.cancelled.connect(self._on_cancelled)
         layout.addWidget(self.wheel)
 
     # ------------------------------------------------------------------
@@ -192,6 +193,7 @@ class FloatingRadialWheel(QWidget):
             self.raise_()
             self.move(target_x, target_y)
             self.activateWindow()
+            self.setFocus()
             self.wheel.setFocus()
             if self.wheel.wheel_items and self.wheel.hovered_index < 0:
                 self.wheel.hovered_index = 0
@@ -320,3 +322,58 @@ class FloatingRadialWheel(QWidget):
         self.hide()
         payload = [self.current_web_url] if self.current_web_url else list(self.current_files)
         self.action_triggered.emit(self.current_mode, item.id, payload)
+
+    def _on_cancelled(self):
+        self.drag_session_active = False
+        self.hide()
+
+    # ------------------------------------------------------------------
+    # Dismissal on Escape, Focus Loss & Click Outside
+    # ------------------------------------------------------------------
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.drag_session_active = False
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.ActivationChange:
+            if not self.isActiveWindow() and not self.drag_session_active:
+                self.hide()
+        super().changeEvent(event)
+
+    def focusOutEvent(self, event):
+        if not self.drag_session_active and not self.isActiveWindow():
+            self.hide()
+        super().focusOutEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        app = QApplication.instance()
+        if app and not self._filter_installed:
+            app.installEventFilter(self)
+            self._filter_installed = True
+
+    def hideEvent(self, event):
+        app = QApplication.instance()
+        if app and self._filter_installed:
+            app.removeEventFilter(self)
+            self._filter_installed = False
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        if self.isVisible():
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self.drag_session_active = False
+                self.hide()
+                return True
+            if event.type() == QEvent.Type.MouseButtonPress and not self.drag_session_active:
+                if hasattr(event, "globalPosition"):
+                    gpos = event.globalPosition().toPoint()
+                else:
+                    gpos = QCursor.pos()
+                if not self.geometry().contains(gpos):
+                    self.hide()
+        return super().eventFilter(watched, event)

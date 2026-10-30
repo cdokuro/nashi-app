@@ -761,6 +761,21 @@ class NashiMainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Space"), self).activated.connect(lambda: self.summon_wheel("tools"))
         QShortcut(QKeySequence("Alt+Space"), self).activated.connect(lambda: self.summon_wheel("actions"))
         QShortcut(QKeySequence("Return"), self).activated.connect(lambda: self.summon_wheel("tools"))
+        QShortcut(QKeySequence("Escape"), self).activated.connect(self._on_escape_pressed)
+
+    def _on_escape_pressed(self):
+        if hasattr(self, "floating_wheel") and self.floating_wheel.isVisible():
+            self.floating_wheel.drag_session_active = False
+            self.floating_wheel.hide()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if hasattr(self, "floating_wheel") and self.floating_wheel.isVisible():
+                self.floating_wheel.drag_session_active = False
+                self.floating_wheel.hide()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def _init_tray(self):
         self.tray = QSystemTrayIcon(self)

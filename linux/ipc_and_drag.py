@@ -260,7 +260,7 @@ class GlobalDragController(QObject):
             self._display = display.Display()
             self._root = self._display.screen().root
             self._xdnd_atom = self._display.intern_atom("XdndSelection")
-            for name in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Meta_L", "Super_L"):
+            for name in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Meta_L", "Super_L", "Escape"):
                 ks = XK.string_to_keysym(name)
                 kc = self._display.keysym_to_keycode(ks)
                 if kc:
@@ -276,6 +276,15 @@ class GlobalDragController(QObject):
                 if keymap[kc // 8] & (1 << (kc % 8)):
                     return True
         return False
+
+    def is_escape_down(self) -> bool:
+        if self._display is None:
+            return False
+        try:
+            km = self._display.query_keymap()
+            return self._is_key_down(km, "Escape")
+        except Exception:
+            return False
 
     def query_pointer_and_chord(self) -> Tuple[bool, int, int, str, bool]:
         """Returns (left_button_held, root_x, root_y, modifier_chord_str, xdnd_active)."""
@@ -332,9 +341,25 @@ class GlobalDragController(QObject):
             return "actions"
         return None
 
-    def simulate_drag_step(self, left_held: bool, x: int, y: int, chord: str, xdnd_active: bool = False):
+    def simulate_drag_step(
+        self,
+        left_held: bool,
+        x: int,
+        y: int,
+        chord: str,
+        xdnd_active: bool = False,
+        escape: bool = False,
+    ):
         """Testable state-machine step used by both real 40ms poll and automated unit tests."""
         if not self.store.get_preference("drag_wheel_enabled", True):
+            return
+
+        if escape:
+            if self._opened:
+                self._down = False
+                self._opened = False
+                self._active_mode = None
+                self.drag_released.emit()
             return
 
         is_dragging = left_held or xdnd_active
@@ -376,8 +401,9 @@ class GlobalDragController(QObject):
                 self.drag_mode_switched.emit(mode)
 
     def _poll(self):
+        esc = self.is_escape_down()
         left_held, x, y, chord, xdnd_active = self.query_pointer_and_chord()
-        self.simulate_drag_step(left_held, x, y, chord, xdnd_active=xdnd_active)
+        self.simulate_drag_step(left_held, x, y, chord, xdnd_active=xdnd_active, escape=esc)
 
 
 class NashiIPCServer(QObject):

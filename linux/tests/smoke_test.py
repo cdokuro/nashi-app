@@ -314,6 +314,45 @@ class NashiSmokeTestSuite(unittest.TestCase):
         self.assertTrue(os.path.exists(redacted))
         self.assertTrue(os.path.getsize(redacted) > 100)
 
+    # 11. Radial Wheel Escape Key & Focus Out Dismissal (v0.3.2)
+    def test_11_wheel_escape_and_focus_out(self):
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent, Qt
+
+        wheel = FloatingRadialWheel(engine=self.engine, store=self.store)
+        wheel.pop_at_cursor(mode="convert", files=[self.img_a], cursor_pos=(200, 200), drag_mode=False)
+        self.assertTrue(wheel.isVisible())
+
+        # Test A: Escape key on FloatingRadialWheel closes it
+        esc_ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        wheel.keyPressEvent(esc_ev)
+        self.assertFalse(wheel.isVisible())
+
+        # Test B: Escape key on inner RadialWheelWidget closes parent wheel
+        wheel.pop_at_cursor(mode="convert", files=[self.img_a], cursor_pos=(200, 200), drag_mode=False)
+        self.assertTrue(wheel.isVisible())
+        wheel.wheel.keyPressEvent(esc_ev)
+        self.assertFalse(wheel.isVisible())
+
+        # Test C: Focus out / window deactivation closes wheel when not dragging
+        wheel.pop_at_cursor(mode="convert", files=[self.img_a], cursor_pos=(200, 200), drag_mode=False)
+        self.assertTrue(wheel.isVisible())
+        act_change = QEvent(QEvent.Type.ActivationChange)
+        wheel.changeEvent(act_change)
+        self.assertFalse(wheel.isVisible())
+
+        # Test D: Global drag controller dismisses drag wheel when Escape is pressed
+        ctrl = GlobalDragController(store=self.store, start_polling=False)
+        released_called = []
+        ctrl.drag_released.connect(lambda: released_called.append(True))
+        ctrl.simulate_drag_step(True, 100, 100, "")
+        ctrl.simulate_drag_step(True, 120, 120, "Shift")
+        self.assertTrue(ctrl._opened)
+        # Escape pressed while dragging
+        ctrl.simulate_drag_step(True, 120, 120, "Shift", escape=True)
+        self.assertFalse(ctrl._opened)
+        self.assertTrue(len(released_called) > 0)
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(NashiSmokeTestSuite)

@@ -277,13 +277,12 @@ class RadialWheelWidget(QWidget):
                 self.item_chosen.emit(item)
                 self.slice_selected.emit(item.id)
                 return
-            # Click inside center hub closes wheel
-            center, outer_r, inner_r, *_ = self._geometry_params()
-            if math.hypot(event.position().x() - center.x(), event.position().y() - center.y()) < inner_r * 0.88:
-                self.cancelled.emit()
-                return
-        elif event.button() == Qt.MouseButton.RightButton:
+            # Click outside any petal (center hub or blank area) cancels and closes
             self.cancelled.emit()
+            return
+        elif event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self.cancelled.emit()
+            return
 
     def keyPressEvent(self, event):
         key = event.key()
