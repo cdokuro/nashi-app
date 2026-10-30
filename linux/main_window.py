@@ -82,6 +82,7 @@ class ConversionWorker(QThread):
                 max_h = self.params.get("max_height")
                 fid = self.params.get("format_id")
                 ref = self.params.get("referer")
+                friendly_action = "MP3 İndiriliyor" if sub_action == "audio" else ("Görsel İndiriliyor" if sub_action == "thumbnail" else "Video İndiriliyor")
                 out_file = self.engine.download_web_link(
                     url,
                     mode=sub_action,
@@ -89,7 +90,7 @@ class ConversionWorker(QThread):
                     format_id=fid,
                     output_dir=dl_dir,
                     referer=ref,
-                    progress_callback=lambda pct, msg: self.progress_updated.emit("Web İndiriliyor…", msg, pct),
+                    progress_callback=lambda pct, msg: self.progress_updated.emit(friendly_action, msg, pct),
                 )
                 outputs.append(out_file)
                 self.store.add_export(url, out_file, os.path.splitext(out_file)[1], action_title="Web İndirme")
@@ -99,9 +100,12 @@ class ConversionWorker(QThread):
             # 2. Format Conversions
             if self.mode == "convert":
                 target_fmt = self.item_id.lower()
-                for fp in self.files:
+                total = len(self.files)
+                for idx, fp in enumerate(self.files):
                     if not os.path.exists(fp):
                         continue
+                    pct = int((idx + 1) * 100 / max(1, total))
+                    self.progress_updated.emit(f"{target_fmt.upper()} Dönüştürülüyor…", os.path.basename(fp), pct)
                     out = self.engine.convert(fp, target_fmt, output_dir=out_dir_opt)
                     outputs.append(out)
                     self.store.add_export(
@@ -1164,10 +1168,34 @@ class NashiMainWindow(QMainWindow):
             self.toast_hud.show_success("Dosyalar taşındı", dest_dir, moved, 3200)
 
     def _start_worker(self, mode: str, item_id: str, files: List[str], params: Optional[Dict[str, Any]] = None):
-        label = item_id.upper() if mode == "convert" else self.engine.get_tool_name(item_id)
+        friendly_map = {
+            "web:video": "Video İndirme",
+            "web:audio": "MP3 Ses İndirme",
+            "web:thumbnail": "Kapak Görseli İndirme",
+            "web:copy": "Bağlantı Kopyalama",
+            "web:open": "Tarayıcıda Açma",
+        }
+        if item_id in friendly_map:
+            label = friendly_map[item_id]
+        elif mode == "convert":
+            label = f"{item_id.upper()} Dönüştürme"
+        else:
+            label = self.engine.get_tool_name(item_id, lang=self.store.get_preference("language", "tr"))
+
+        detail_txt = ""
+        if files:
+            first_f = files[0]
+            if self.engine.is_web_url(first_f):
+                parsed = urllib.parse.urlparse(first_f)
+                name = os.path.basename(parsed.path) or parsed.netloc
+                detail_txt = f"{name[:28]}…" if len(name) > 28 else name
+            else:
+                detail_txt = os.path.basename(first_f)
+
         self.toast_hud.show_progress(
             f"Nashi çalışıyor: {label}…",
-            os.path.basename(files[0]) if files else "",
+            detail_txt,
+            percent=0,
         )
         self._active_worker = ConversionWorker(
             self.engine,

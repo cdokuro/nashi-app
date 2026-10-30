@@ -2054,23 +2054,48 @@ class NashiEngine:
                 ])
             cmd.extend(["--print", "after_move:filepath", active_url])
             try:
-                # If progress_callback provided, stream stdout lines to parse NASHI_PROGRESS
+                # If progress_callback provided, stream stdout lines to parse percentage
                 if progress_callback:
-                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                     out_lines = []
+                    last_pct = -1
+                    progress_callback(0, "İndirme başlatılıyor… %0")
+
                     while True:
                         line = p.stdout.readline()
                         if not line and p.poll() is not None:
                             break
                         if line:
                             out_lines.append(line)
+                            pct_val = None
+
                             if "NASHI_PROGRESS:" in line:
                                 try:
                                     raw_pct = line.split("NASHI_PROGRESS:")[1].strip().replace("%", "")
                                     pct_val = int(float(raw_pct))
-                                    progress_callback(pct_val, f"İndiriliyor: %{pct_val}")
                                 except Exception:
                                     pass
+                            elif "[download]" in line and "%" in line:
+                                try:
+                                    m = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
+                                    if m:
+                                        pct_val = int(float(m.group(1)))
+                                except Exception:
+                                    pass
+                            elif "[hlsnative]" in line and "/" in line:
+                                try:
+                                    m = re.search(r"(\d+)\s*/\s*(\d+)", line)
+                                    if m:
+                                        c_frag, t_frag = int(m.group(1)), int(m.group(2))
+                                        if t_frag > 0:
+                                            pct_val = int(c_frag * 100 / t_frag)
+                                except Exception:
+                                    pass
+
+                            if pct_val is not None and pct_val != last_pct and 0 <= pct_val <= 100:
+                                last_pct = pct_val
+                                progress_callback(pct_val, f"İndiriliyor: %{pct_val}")
+
                     p.wait()
                     out = "".join(out_lines)
                 else:
@@ -2078,12 +2103,14 @@ class NashiEngine:
 
                 lines = [l.strip() for l in out.splitlines() if l.strip() and os.path.exists(l.strip())]
                 if lines:
+                    if progress_callback:
+                        progress_callback(100, "Tamamlandı! %100")
                     return lines[-1]
             except Exception as e:
                 if any(k in active_url.lower() for k in ["youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "cdn", "hls", "master"]):
                     raise RuntimeError(f"Medya indirilemedi ({active_url}): {e}")
 
-        # Direct HTTP/HTTPS download fallback (only for direct files or when yt-dlp is unavailable)
+        # Direct HTTP/HTTPS download fallback (with live chunked progress calculation)
         fname = os.path.basename(parsed.path) or "downloaded_media"
         if "." not in fname:
             if mode == "image":
@@ -2100,8 +2127,37 @@ class NashiEngine:
             counter += 1
 
         req = urllib.request.Request(active_url, headers={"User-Agent": "Nashi/2.0 (Linux)"})
-        with urllib.request.urlopen(req, timeout=15) as resp, open(target, "wb") as f_out:
-            shutil.copyfileobj(resp, f_out)
+        with urllib.request.urlopen(req, timeout=20) as resp, open(target, "wb") as f_out:
+            total_bytes = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            chunk_size = 65536
+            last_p = -1
+            if progress_callback:
+                progress_callback(0, "İndirme başlatılıyor… %0")
+
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                f_out.write(chunk)
+                downloaded += len(chunk)
+
+                if progress_callback:
+                    if total_bytes > 0:
+                        cur_p = min(100, int(downloaded * 100 / total_bytes))
+                        if cur_p != last_p:
+                            last_p = cur_p
+                            progress_callback(cur_p, f"İndiriliyor: %{cur_p}")
+                    else:
+                        mb = downloaded / (1024 * 1024)
+                        cur_p = min(95, int(mb * 5))
+                        if cur_p != last_p:
+                            last_p = cur_p
+                            progress_callback(cur_p, f"İndiriliyor: {mb:.1f} MB (%{cur_p})")
+
+            if progress_callback:
+                progress_callback(100, "Tamamlandı! %100")
+
         return str(target)
 
 

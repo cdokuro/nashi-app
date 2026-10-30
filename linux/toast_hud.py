@@ -111,12 +111,24 @@ class NashiToastHUD(QWidget):
         self.lbl_detail.setStyleSheet("font-size: 11px;")
         text_col.addWidget(self.lbl_detail)
 
+        self.prog_container = QWidget()
+        prog_row = QHBoxLayout(self.prog_container)
+        prog_row.setContentsMargins(0, 2, 0, 0)
+        prog_row.setSpacing(10)
+
         self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.setFixedHeight(5)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFixedHeight(6)
         self.progress.setTextVisible(False)
-        self.progress.hide()
-        text_col.addWidget(self.progress)
+        prog_row.addWidget(self.progress, stretch=1)
+
+        self.lbl_percent = QLabel("%0")
+        self.lbl_percent.setStyleSheet("font-size: 12px; font-weight: 800; min-width: 44px; text-align: right; background: transparent;")
+        prog_row.addWidget(self.lbl_percent)
+
+        self.prog_container.hide()
+        text_col.addWidget(self.prog_container)
 
         layout.addLayout(text_col, stretch=1)
 
@@ -141,6 +153,7 @@ class NashiToastHUD(QWidget):
         pal = get_theme_palette(theme)
         self.lbl_title.setStyleSheet(f"color: {pal['ink']}; font-size: 13px; font-weight: 700; background: transparent;")
         self.lbl_detail.setStyleSheet(f"color: {pal['muted']}; font-size: 11px; background: transparent;")
+        self.lbl_percent.setStyleSheet(f"color: {pal['gold']}; font-size: 12px; font-weight: 800; min-width: 44px; text-align: right; background: transparent;")
         self.progress.setStyleSheet(f"""
             QProgressBar {{
                 background-color: {pal['inset']};
@@ -197,16 +210,16 @@ class NashiToastHUD(QWidget):
         self._files = []
         self.mascot.set_happy(False)
         self.lbl_title.setText(title)
-        
-        if percent is not None and 0 <= percent <= 100:
-            self.lbl_detail.setText(f"{detail} (%{percent})")
-            self.progress.setRange(0, 100)
-            self.progress.setValue(percent)
-        else:
-            self.lbl_detail.setText(detail)
-            self.progress.setRange(0, 0)
 
+        val = 0 if percent is None else max(0, min(100, int(percent)))
+        self.lbl_detail.setText(detail)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(val)
+        self.lbl_percent.setText(f"%{val}")
+
+        self.prog_container.show()
         self.progress.show()
+        self.lbl_percent.show()
         self.btn_copy.hide()
         self.btn_reveal.hide()
         self._position_on_screen()
@@ -221,6 +234,7 @@ class NashiToastHUD(QWidget):
         self.mascot.set_happy(True)
         self.lbl_title.setText(title)
         self.lbl_detail.setText(detail)
+        self.prog_container.hide()
         self.progress.hide()
 
         has_files = bool(self._files and any(os.path.exists(f) for f in self._files))
@@ -242,6 +256,7 @@ class NashiToastHUD(QWidget):
         self.mascot.set_happy(False)
         self.lbl_title.setText(f"⚠️ {title}")
         self.lbl_detail.setText(detail[:90])
+        self.prog_container.hide()
         self.progress.hide()
         self.btn_copy.hide()
         self.btn_reveal.hide()

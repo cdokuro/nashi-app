@@ -286,8 +286,13 @@ class NashiSmokeTestSuite(unittest.TestCase):
         self.assertEqual(shelf.list_widget.count(), 2)
 
         hud = NashiToastHUD(theme="dark")
+        hud.show_progress("İndiriliyor", "sample.mp4", percent=45)
+        self.assertEqual(hud.lbl_percent.text(), "%45")
+        self.assertEqual(hud.progress.value(), 45)
+        self.assertTrue(hud.prog_container.isVisible())
         hud.show_success("Test Başarılı", "sample_a.png", [self.img_a], duration_ms=100)
         self.assertTrue(hud.isVisible())
+        self.assertFalse(hud.prog_container.isVisible())
         hud.hide()
 
     # 8. Web Media Probing & Dialog Test
