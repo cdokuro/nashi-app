@@ -36,6 +36,7 @@ from toast_hud import NashiToastHUD, reveal_in_file_manager, copy_files_to_clipb
 from float_shelf import FloatShelfWindow
 from editors import CropEditorDialog, ImageEditDialog, MediaTrimDialog
 from web_download_dialog import WebDownloadDialog
+from download_progress_dialog import DownloadProgressDialog
 from tool_setup_dialog import ToolSetupDialog
 from ipc_and_drag import (
     send_ipc_command,
@@ -213,6 +214,7 @@ class NashiMainWindow(QMainWindow):
         self.store = get_store()
         self.selected_files: List[str] = []
         self._active_worker: Optional[ConversionWorker] = None
+        self._download_dlg: Optional[DownloadProgressDialog] = None
 
         self.setWindowTitle("Nashi")
         self.setWindowIcon(NashiArtwork.icon(64, happy=False))
@@ -1213,10 +1215,39 @@ class NashiMainWindow(QMainWindow):
         self._active_worker.progress_updated.connect(
             lambda title, detail, pct: self.toast_hud.show_progress(title, detail, percent=pct)
         )
+
+        if mode == "web" or item_id.startswith("web:"):
+            if not self._download_dlg or not self._download_dlg.isVisible():
+                first_url = files[0] if files else ""
+                out_d = (params or {}).get("output_dir", "")
+                self._download_dlg = DownloadProgressDialog(
+                    title=label,
+                    url=first_url,
+                    dest_dir=out_d,
+                    parent=self,
+                )
+                self._download_dlg.show()
+                self._download_dlg.raise_()
+
+        if self._download_dlg:
+            self._active_worker.progress_updated.connect(self._download_dlg.update_progress)
+            self._download_dlg.canceled.connect(self._cancel_active_worker)
+
         self._active_worker.finished.connect(self._on_worker_finished)
         self._active_worker.start()
 
+    def _cancel_active_worker(self):
+        if self._active_worker and self._active_worker.isRunning():
+            try:
+                self._active_worker.terminate()
+            except Exception:
+                pass
+            self.toast_hud.show_error("İptal Edildi", "İndirme kullanıcı tarafından durduruldu.", duration_ms=2500)
+
     def _on_worker_finished(self, success: bool, title: str, detail: str, outputs: list):
+        if self._download_dlg:
+            self._download_dlg.set_completed(success, title, detail, outputs)
+
         if success:
             if not outputs and detail:
                 # e.g., QR code decoded text
@@ -1249,13 +1280,25 @@ class NashiMainWindow(QMainWindow):
         }
         # Check if the active dialog resolved an internal stream URL & referer
         active_dlg = self.findChild(WebDownloadDialog)
+        title_hint = "Web Medyası"
         if active_dlg and active_dlg._current_info:
             stream_url = active_dlg._current_info.get("url")
             ref = active_dlg._current_info.get("referer")
+            title_hint = active_dlg._current_info.get("title") or title_hint
             if stream_url and stream_url.startswith("http"):
                 url = stream_url
             if ref:
                 params["referer"] = ref
+
+        # Small dedicated download window
+        self._download_dlg = DownloadProgressDialog(
+            title=title_hint,
+            url=url,
+            dest_dir=out_dir,
+            parent=self,
+        )
+        self._download_dlg.show()
+        self._download_dlg.raise_()
 
         self._start_worker("web", item_id, [url], params=params)
 

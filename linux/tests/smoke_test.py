@@ -36,6 +36,7 @@ from floating_wheel import FloatingRadialWheel
 from ipc_and_drag import GlobalDragController
 from float_shelf import FloatShelfWindow
 from toast_hud import NashiToastHUD
+from download_progress_dialog import DownloadProgressDialog
 
 app = QApplication.instance() or QApplication(sys.argv)
 
@@ -294,6 +295,17 @@ class NashiSmokeTestSuite(unittest.TestCase):
         self.assertTrue(hud.isVisible())
         self.assertFalse(hud.prog_container.isVisible())
         hud.hide()
+
+        # DownloadProgressDialog smoke
+        dlg = DownloadProgressDialog(title="Test Download", url="https://example.com/video.mp4")
+        dlg.update_progress("Test Download", "İndiriliyor: %50", 50)
+        self.assertEqual(dlg.progress_bar.value(), 50)
+        self.assertEqual(dlg.lbl_percent.text(), "%50")
+        dlg.set_completed(True, "Tamamlandı", "video.mp4", [self.img_a])
+        self.assertEqual(dlg.progress_bar.value(), 100)
+        self.assertFalse(dlg.btn_reveal.isHidden())
+        self.assertFalse(dlg.btn_copy.isHidden())
+        dlg.accept()
 
     # 8. Web Media Probing & Dialog Test
     def test_08_web_media_probing(self):
