@@ -1649,6 +1649,9 @@ class NashiMainWindow(QMainWindow):
 
 def main():
     args = sys.argv[1:]
+    if "--version" in args or "-v" in args:
+        print(f"Nashi v{__version__} (Linux Native Port)")
+        return
     file_args = [str(Path(a).resolve()) for a in args if not a.startswith("-") and os.path.exists(a)]
 
     # Determine requested mode from CLI flags
