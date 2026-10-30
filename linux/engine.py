@@ -381,7 +381,43 @@ class NashiEngine:
         self._run_cmd(cmd, desc="Image conversion")
         return output_path
 
-    def _convert_pdf_to_image(self, input_path: str, output_path: str, target_format: str) -> str:
+    def convert_html_to_pdf(self, input_path: str, output_path: Optional[str] = None, output_dir: Optional[str] = None) -> str:
+        """Converts an HTML file offline into a clean PDF using Qt's internal layout and print engine."""
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"HTML file not found: {input_path}")
+
+        if not output_path:
+            output_path = self._resolve_output_path(input_path, "pdf", output_dir)
+
+        # Robust text reading supporting UTF-8, Windows-1254 (Turkish), ISO-8859-9, and Latin1
+        html_bytes = Path(input_path).read_bytes()
+        html_content = ""
+        for enc in ("utf-8", "windows-1254", "iso-8859-9", "cp1252", "latin1"):
+            try:
+                html_content = html_bytes.decode(enc)
+                break
+            except Exception:
+                continue
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QTextDocument
+        from PySide6.QtPrintSupport import QPrinter
+
+        doc = QTextDocument()
+        # Set base directory for any relative assets/styles
+        base_url = QUrl.fromLocalFile(str(Path(input_path).parent.resolve()) + "/")
+        doc.setBaseUrl(base_url)
+        doc.setHtml(html_content)
+
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(output_path)
+        doc.print_(printer)
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError(f"HTML'den PDF üretilemedi: {output_path}")
+
+        return output_path
         cmd = [
             "magick",
             "-density", "250",
@@ -580,10 +616,11 @@ class NashiEngine:
                 output_path
             ]
         elif mode == "blur":
+            # Multi-pass heavy blur matching macOS Redact Photo strength (v0.7.13 parity)
             cmd = [
                 "magick", input_path,
                 "-region", f"{rw}x{rh}+{rx}+{ry}",
-                "-blur", "0x18",
+                "-blur", "0x36",
                 "+region",
                 output_path
             ]
@@ -833,14 +870,24 @@ class NashiEngine:
         duration = self.get_media_duration(video_path)
         parts = max(2, min(10, int(parts)))
         seg_len = duration / parts
+        # Sub-0.05s remainder safety check (v0.7.13 parity)
         outputs = []
         for i in range(parts):
             start_t = i * seg_len
+            # If final part, extend to the exact duration to avoid trailing sub-0.05s fragment
+            if i == parts - 1:
+                cur_len = duration - start_t
+            else:
+                cur_len = seg_len
+
+            if cur_len < 0.05:
+                continue
+
             out_file = self._resolve_output_path(video_path, ext, str(dest_dir), suffix=f"_part{i+1}")
             cmd = [
                 "ffmpeg", "-y",
-                "-ss", f"{start_t:.2f}",
-                "-t", f"{seg_len:.2f}",
+                "-ss", f"{start_t:.3f}",
+                "-t", f"{cur_len:.3f}",
                 "-i", video_path,
                 "-c", "copy",
                 out_file
@@ -863,7 +910,14 @@ class NashiEngine:
         if not output_path:
             output_path = self._resolve_output_path(audio_path, ext, output_dir, suffix="_normalized")
 
-        cmd = ["ffmpeg", "-y", "-i", audio_path, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", output_path]
+        # Cap sample rate at 192 kHz and preserve original encoder rate (v0.7.13 parity)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", audio_path,
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "48000",
+            output_path
+        ]
         self._run_cmd(cmd, desc="Normalize audio")
         return output_path
 
@@ -1372,6 +1426,10 @@ class NashiEngine:
 
     def _convert_document(self, input_path: str, output_path: str, src_ext: str, tgt_ext: str) -> str:
         """Converts Markdown, Text, HTML, and PDF documents."""
+        # HTML to PDF conversion (New in v0.7.13 / v0.3.0)
+        if src_ext in ("html", "htm") and tgt_ext == "pdf":
+            return self.convert_html_to_pdf(input_path, output_path)
+
         if src_ext == "pdf" and tgt_ext in ("txt", "md", "html"):
             if shutil.which("pdftotext"):
                 with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tf:

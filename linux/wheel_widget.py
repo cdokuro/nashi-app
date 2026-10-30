@@ -52,6 +52,8 @@ class RadialWheelWidget(QWidget):
     def __init__(self, items: Optional[List[Any]] = None, parent=None):
         super().__init__(parent)
         self._items: List[WheelItem] = []
+        self._cached_paths: List[QPainterPath] = []
+        self._cached_size: Optional[Tuple[float, float, int]] = None
         self.hovered_index: int = -1
         self._theme: str = "dark"
         self._finish: str = "glass"  # 'glass' or 'metallic'
@@ -85,6 +87,8 @@ class RadialWheelWidget(QWidget):
                 s = str(it)
                 normalized.append(WheelItem(item_id=s, title=s, symbol=""))
         self._items = normalized[:12]  # Cap at 12 petals like WheelWindow.cs
+        self._cached_size = None
+        self._cached_paths = []
         if self.hovered_index >= len(self._items):
             self.hovered_index = -1
         self.update()
@@ -123,7 +127,51 @@ class RadialWheelWidget(QWidget):
         start_deg = 180.0 if count == 3 else 90.0
         return center, outer_r, inner_r, scale, count, start_deg
 
+    def _rebuild_cache_if_needed(self):
+        w, h = float(self.width()), float(self.height())
+        count = max(1, len(self._items))
+        key = (w, h, count)
+        if self._cached_size == key and len(self._cached_paths) == count:
+            return
+
+        self._cached_paths = []
+        center, outer_r, inner_r, scale, count, start_deg = self._geometry_params()
+        delta = 360.0 / count
+        gap = 1.3 if count > 1 else 0.0
+
+        rect_out = QRectF(center.x() - outer_r, center.y() - outer_r, outer_r * 2, outer_r * 2)
+
+        for i in range(count):
+            mid = start_deg - i * delta
+            a = mid - delta / 2.0 + gap
+            b = mid + delta / 2.0 - gap
+
+            path = QPainterPath()
+            a_rad = math.radians(a)
+            path.moveTo(
+                center.x() + inner_r * math.cos(a_rad),
+                center.y() - inner_r * math.sin(a_rad),
+            )
+            path.lineTo(
+                center.x() + outer_r * math.cos(a_rad),
+                center.y() - outer_r * math.sin(a_rad),
+            )
+            path.arcTo(rect_out, a, b - a)
+            b_rad = math.radians(b)
+            path.lineTo(
+                center.x() + inner_r * math.cos(b_rad),
+                center.y() - inner_r * math.sin(b_rad),
+            )
+            path.closeSubpath()
+            self._cached_paths.append(path)
+
+        self._cached_size = key
+
     def _petal_path(self, index: int) -> QPainterPath:
+        self._rebuild_cache_if_needed()
+        if 0 <= index < len(self._cached_paths):
+            return self._cached_paths[index]
+
         center, outer_r, inner_r, scale, count, start_deg = self._geometry_params()
         delta = 360.0 / count
         gap = 1.3 if count > 1 else 0.0

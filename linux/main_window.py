@@ -1378,7 +1378,7 @@ class NashiMainWindow(QMainWindow):
             QMainWindow, QWidget {{
                 background-color: {pal['paper']};
                 color: {pal['ink']};
-                font-family: 'Inter', 'Noto Sans', 'Segoe UI', sans-serif;
+                font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Noto Sans', sans-serif;
             }}
             QLabel {{
                 background: transparent;
@@ -1388,21 +1388,22 @@ class NashiMainWindow(QMainWindow):
                 background-color: {pal['inset']};
                 color: {pal['muted']};
                 border: 1px solid {pal['line']};
-                border-radius: 12px;
-                padding: 5px 12px;
+                border-radius: 14px;
+                padding: 6px 14px;
                 font-size: 11px;
                 font-weight: 600;
+                letter-spacing: 0.2px;
             }}
             #DropGardenCard, #LinkCard, #SettingsCard {{
                 background-color: {pal['surface']};
                 border: 1px solid {pal['line']};
-                border-radius: 22px;
+                border-radius: 20px;
             }}
             #StartBadge {{
                 background-color: {pal['sand']};
                 color: {pal['gold']};
-                border-radius: 10px;
-                padding: 4px 10px;
+                border-radius: 8px;
+                padding: 4px 9px;
                 font-size: 10px;
                 font-weight: 800;
                 letter-spacing: 0.8px;
@@ -1411,26 +1412,27 @@ class NashiMainWindow(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {pal['gold']}, stop:1 {pal['gold_end']});
                 color: {pal['button_ink']};
                 border: none;
-                border-radius: 13px;
-                padding: 10px 20px;
+                border-radius: 12px;
+                padding: 10px 22px;
                 font-size: 13px;
-                font-weight: 800;
+                font-weight: 700;
             }}
             #PrimaryGoldBtn:hover {{
-                background-color: {pal['gold_end']};
+                background: {pal['gold_end']};
             }}
             #SecondaryCardBtn {{
                 background-color: {pal['inset']};
                 color: {pal['ink']};
                 border: 1px solid {pal['line']};
-                border-radius: 12px;
-                padding: 9px 15px;
+                border-radius: 11px;
+                padding: 8px 14px;
                 font-size: 12px;
-                font-weight: 700;
+                font-weight: 600;
             }}
             #SecondaryCardBtn:hover {{
                 border-color: {pal['gold']};
                 color: {pal['gold']};
+                background-color: {pal['surface']};
             }}
             #ChordPillBtn {{
                 background-color: {pal['sage']};

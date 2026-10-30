@@ -298,6 +298,22 @@ class NashiSmokeTestSuite(unittest.TestCase):
         self.assertTrue(len(info["formats"]) > 0)
         self.assertEqual(info["kind"], "video")
 
+    # 9. HTML to PDF Offline Conversion (v0.7.13 / v0.3.0 Parity)
+    def test_09_html_to_pdf_conversion(self):
+        html_file = os.path.join(self.tmp_dir.name, "document.html")
+        with open(html_file, "w", encoding="utf-8") as f:
+            f.write("<html><head><title>Nashi</title></head><body><h1>Başlık: Türkçe Karakterler (ç, ğ, ı, ö, ş, ü)</h1><p>Offline PDF çıktısı testi.</p></body></html>")
+
+        pdf_out = self.engine.convert(html_file, "pdf")
+        self.assertTrue(os.path.exists(pdf_out))
+        self.assertTrue(os.path.getsize(pdf_out) > 500)
+
+    # 10. Photo Redaction Blur Strength (v0.7.13 Parity)
+    def test_10_photo_redact_heavy_blur(self):
+        redacted = self.engine.redact_image(self.img_a, mode="blur")
+        self.assertTrue(os.path.exists(redacted))
+        self.assertTrue(os.path.getsize(redacted) > 100)
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(NashiSmokeTestSuite)
