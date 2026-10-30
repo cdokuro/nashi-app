@@ -227,7 +227,7 @@ class NashiToastHUD(QWidget):
         self.show()
         self.raise_()
 
-    def show_success(self, title: str, detail: str, files: Optional[List[str]] = None, duration_ms: int = 3800):
+    def show_success(self, title: str, detail: str, files: Optional[List[str]] = None, duration_ms: int = 5000):
         self._dismiss_timer.stop()
         self._fading_out = False
         self._files = list(files or [])
@@ -237,7 +237,7 @@ class NashiToastHUD(QWidget):
         self.prog_container.hide()
         self.progress.hide()
 
-        has_files = bool(self._files and any(os.path.exists(f) for f in self._files))
+        has_files = bool(self._files)
         self.btn_copy.setVisible(has_files)
         self.btn_reveal.setVisible(has_files)
         self.btn_copy.setText("Kopyala")
@@ -266,6 +266,19 @@ class NashiToastHUD(QWidget):
         self.raise_()
         if duration_ms > 0:
             self._dismiss_timer.start(duration_ms)
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._dismiss_timer.stop()
+        if self._fading_out:
+            self._anim.stop()
+            self.setWindowOpacity(1.0)
+            self._fading_out = False
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if self._files and not self.prog_container.isVisible():
+            self._dismiss_timer.start(3500)
 
     def _on_copy_clicked(self):
         if self._files:

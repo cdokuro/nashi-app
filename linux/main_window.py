@@ -17,7 +17,8 @@ if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" and not os.enviro
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import (
-    QFont, QKeySequence, QShortcut, QAction, QCursor, QDesktopServices
+    QFont, QKeySequence, QShortcut, QAction, QCursor, QDesktopServices,
+    QColor, QPalette
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -500,9 +501,11 @@ class NashiMainWindow(QMainWindow):
         self.home_recent_list = QListWidget()
         self.home_recent_list.setObjectName("RecentList")
         self.home_recent_list.setFixedHeight(130)
+        self.home_recent_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.home_recent_list.itemDoubleClicked.connect(self._on_history_item_double_clicked)
         layout.addWidget(self.home_recent_list)
 
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(page)
         return scroll
 
@@ -532,6 +535,7 @@ class NashiMainWindow(QMainWindow):
 
         self.lib_list = QListWidget()
         self.lib_list.setObjectName("RecentList")
+        self.lib_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.lib_list.itemDoubleClicked.connect(self._on_history_item_double_clicked)
         layout.addWidget(self.lib_list, stretch=1)
 
@@ -575,6 +579,7 @@ class NashiMainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background: transparent;")
 
         page = QWidget()
@@ -1252,7 +1257,6 @@ class NashiMainWindow(QMainWindow):
             if ref:
                 params["referer"] = ref
 
-        self.toast_hud.show_success("İndirme Başlatıldı", os.path.basename(url) or "Web Medyası", [], 2500)
         self._start_worker("web", item_id, [url], params=params)
 
     def prompt_generate_qr(self):
@@ -1434,11 +1438,70 @@ class NashiMainWindow(QMainWindow):
         self.float_shelf.set_theme(theme_name)
         self.floating_wheel.wheel.set_theme(theme_name, finish=self.store.get_preference("wheel_finish", "glass"))
 
+        # Match title bar / frame color with app background for KWin / Wayland / X11 window managers
+        qpal = self.palette()
+        bg_col = QColor(pal['paper'])
+        qpal.setColor(QPalette.ColorRole.Window, bg_col)
+        qpal.setColor(QPalette.ColorRole.Base, bg_col)
+        qpal.setColor(QPalette.ColorRole.WindowText, QColor(pal['ink']))
+        self.setPalette(qpal)
+        app_inst = QApplication.instance()
+        if app_inst:
+            app_inst.setPalette(qpal)
+
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{
                 background-color: {pal['paper']};
                 color: {pal['ink']};
                 font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Noto Sans', sans-serif;
+            }}
+            /* Apple-grade soft minimalist scrollbars */
+            QScrollBar:vertical {{
+                border: none;
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(255, 255, 255, 0.18);
+                min-height: 28px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {pal['gold']};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: none;
+                border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+
+            QScrollBar:horizontal {{
+                border: none;
+                background: transparent;
+                height: 6px;
+                margin: 0px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: rgba(255, 255, 255, 0.18);
+                min-width: 28px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {pal['gold']};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width: 0px;
+                background: none;
+                border: none;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: transparent;
             }}
             QLabel {{
                 background: transparent;
