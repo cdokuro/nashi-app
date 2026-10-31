@@ -2024,8 +2024,9 @@ class NashiEngine:
                 yt_dlp_bin,
                 "--no-playlist",
                 "--no-colors",
+                "--progress",
                 "--newline",
-                "--progress-template", "download:NASHI_PROGRESS:%(progress._percent_str)s",
+                "--progress-template", "download:NASHI_PROGRESS:%(progress._percent_str)s|%(progress._speed_str)s",
                 "--windows-filenames",
                 "--trim-filenames", "160",
                 "--downloader", "native",
@@ -2059,6 +2060,8 @@ class NashiEngine:
                     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                     out_lines = []
                     last_pct = -1
+                    last_raw = -1
+                    stream_num = 1
                     progress_callback(0, "İndirme başlatılıyor… %0")
 
                     while True:
@@ -2068,11 +2071,32 @@ class NashiEngine:
                         if line:
                             out_lines.append(line)
                             pct_val = None
+                            spd_text = ""
+                            phase = "İndiriliyor"
 
                             if "NASHI_PROGRESS:" in line:
                                 try:
-                                    raw_pct = line.split("NASHI_PROGRESS:")[1].strip().replace("%", "")
-                                    pct_val = int(float(raw_pct))
+                                    payload = line.split("NASHI_PROGRESS:")[1].strip()
+                                    parts = payload.split("|")
+                                    raw_pct = float(parts[0].replace("%", "").strip())
+                                    spd = parts[1].strip() if len(parts) > 1 and "Unknown" not in parts[1] else ""
+                                    spd_text = f" ({spd})" if spd else ""
+
+                                    if mode == "audio":
+                                        pct_val = int(raw_pct)
+                                        phase = "Ses indiriliyor"
+                                    else:
+                                        if stream_num == 1 and last_raw > 85 and raw_pct < 10:
+                                            stream_num = 2
+                                        last_raw = raw_pct
+
+                                        if stream_num == 1:
+                                            is_two_stream = bool(format_id != "direct" and not (format_id and "/" in str(format_id)))
+                                            pct_val = int(raw_pct * 0.85) if is_two_stream else int(raw_pct)
+                                            phase = "Video indiriliyor"
+                                        else:
+                                            pct_val = 85 + int(raw_pct * 0.15)
+                                            phase = "Ses indiriliyor"
                                 except Exception:
                                     pass
                             elif "[download]" in line and "%" in line:
@@ -2089,12 +2113,15 @@ class NashiEngine:
                                         c_frag, t_frag = int(m.group(1)), int(m.group(2))
                                         if t_frag > 0:
                                             pct_val = int(c_frag * 100 / t_frag)
+                                            phase = f"Parça {c_frag}/{t_frag} indiriliyor"
                                 except Exception:
                                     pass
 
-                            if pct_val is not None and pct_val != last_pct and 0 <= pct_val <= 100:
-                                last_pct = pct_val
-                                progress_callback(pct_val, f"İndiriliyor: %{pct_val}")
+                            if pct_val is not None:
+                                pct_val = max(0, min(100, pct_val))
+                                if pct_val != last_pct:
+                                    last_pct = pct_val
+                                    progress_callback(pct_val, f"{phase}: %{pct_val}{spd_text}")
 
                     p.wait()
                     out = "".join(out_lines)
@@ -2106,9 +2133,22 @@ class NashiEngine:
                     if progress_callback:
                         progress_callback(100, "Tamamlandı! %100")
                     return lines[-1]
+                else:
+                    err_lines = [l for l in out.splitlines() if "ERROR:" in l or "WARNING:" in l]
+                    err_msg = " ".join(err_lines[-2:]) if err_lines else ""
+                    if any(k in active_url.lower() for k in ["instagram.com", "facebook.com", "tiktok.com", "twitter.com", "x.com"]):
+                        if "api is not granting access" in err_msg.lower() or "empty media" in err_msg.lower() or "login" in err_msg.lower():
+                            raise RuntimeError("Instagram oturumsuz video indirmeye izin vermiyor (Meta API bot koruması).")
+                        raise RuntimeError(f"Sosyal medya videosu indirilemedi: {err_msg or 'Video akışına erişilemedi'}")
+                    if any(k in active_url.lower() for k in ["youtube.com", "youtu.be", "vimeo.com", "cdn", "hls", "master"]):
+                        raise RuntimeError(f"Medya indirilemedi: {err_msg or 'Akış bulunamadı'}")
             except Exception as e:
-                if any(k in active_url.lower() for k in ["youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "cdn", "hls", "master"]):
+                if any(k in active_url.lower() for k in ["instagram.com", "facebook.com", "tiktok.com", "twitter.com", "x.com", "youtube.com", "youtu.be", "vimeo.com", "cdn", "hls", "master"]):
                     raise RuntimeError(f"Medya indirilemedi ({active_url}): {e}")
+
+        # Social media pages cannot be downloaded via raw HTTP GET fallback (which only yields HTML)
+        if any(k in active_url.lower() for k in ["instagram.com", "facebook.com", "youtube.com", "youtu.be", "tiktok.com", "twitter.com", "x.com"]):
+            raise RuntimeError("Bu platform video dosyasını doğrudan paylaşmıyor (oturum / API koruması devrede).")
 
         # Direct HTTP/HTTPS download fallback (with live chunked progress calculation)
         fname = os.path.basename(parsed.path) or "downloaded_media"

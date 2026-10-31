@@ -1,5 +1,5 @@
 """
 Nashi Linux Version Information
 """
-__version__ = "0.3.6"
-VERSION_TUPLE = (0, 3, 6)
+__version__ = "0.3.7"
+VERSION_TUPLE = (0, 3, 7)
