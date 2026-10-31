@@ -415,6 +415,25 @@ class NashiSmokeTestSuite(unittest.TestCase):
         self.assertTrue(len(fin_o) > 0)
         dlg.close()
 
+    # 13. Main Window Web Download Pipeline & Worker Start (v0.3.9)
+    def test_13_main_window_web_download_pipeline(self):
+        from main_window import NashiMainWindow
+
+        win = NashiMainWindow(start_hidden=True)
+        # Ensure _on_web_download_requested and _start_worker do not raise NameError on URL parsing
+        win._on_web_download_requested(
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            "video",
+            720,
+            "best",
+            self.tmp_dir.name,
+        )
+        self.assertIsNotNone(win._active_worker)
+        self.assertIsNotNone(win._download_dlg)
+        win._cancel_active_worker()
+        win._download_dlg.close()
+        win.close()
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(NashiSmokeTestSuite)

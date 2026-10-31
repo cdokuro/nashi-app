@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Callable
 
 
 IMAGE_FORMATS = {

@@ -8,7 +8,7 @@ Ported directly from WheelGeometry.swift & Wheel.swift:
 """
 
 import math
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import (
     QPainter, QPainterPath, QColor, QPen, QFont, QBrush,
