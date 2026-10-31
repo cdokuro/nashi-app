@@ -1285,7 +1285,11 @@ class NashiMainWindow(QMainWindow):
             stream_url = active_dlg._current_info.get("url")
             ref = active_dlg._current_info.get("referer")
             title_hint = active_dlg._current_info.get("title") or title_hint
-            if stream_url and stream_url.startswith("http"):
+            is_portal = any(d in url.lower() for d in [
+                "youtube.com", "youtu.be", "twitter.com", "x.com",
+                "instagram.com", "tiktok.com", "reddit.com", "vimeo.com", "twitch.tv"
+            ])
+            if stream_url and stream_url.startswith("http") and not is_portal:
                 url = stream_url
             if ref:
                 params["referer"] = ref

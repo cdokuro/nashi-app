@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -1803,9 +1804,19 @@ class NashiEngine:
 
         return outputs
 
-    # ----------------------------------------------------------------------
-    # Web Link Probing & Deep Crawler (IDM / macOS WebDownloadEngine Parity)
-    # ----------------------------------------------------------------------
+    @staticmethod
+    def _get_js_runtime_args() -> List[str]:
+        node = shutil.which("node") or shutil.which("deno") or shutil.which("bun")
+        if not node:
+            for p in Path.home().glob(".local/share/nvm/*/bin/node"):
+                if os.access(str(p), os.X_OK):
+                    node = str(p)
+                    break
+        if node:
+            rt_name = os.path.basename(node)
+            return ["--js-runtimes", f"{rt_name}:{node}"]
+        return []
+
     # ----------------------------------------------------------------------
     # Web Link Probing & Deep Crawler (IDM / macOS WebDownloadEngine Parity)
     # ----------------------------------------------------------------------
@@ -1911,8 +1922,9 @@ class NashiEngine:
                 "--no-warnings",
                 "--socket-timeout", "15",
                 "--referer", probe_referer,
-                probe_target,
             ]
+            cmd.extend(self._get_js_runtime_args())
+            cmd.append(probe_target)
             try:
                 proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
                 if proc.returncode == 0 and proc.stdout.strip():
@@ -2005,17 +2017,8 @@ class NashiEngine:
         yt_dlp_bin = shutil.which("yt-dlp") or str(Path.home() / ".local/bin/yt-dlp")
         has_yt_dlp = os.path.exists(yt_dlp_bin) and os.access(yt_dlp_bin, os.X_OK)
 
-        # If URL is an HTML page rather than a direct stream, probe it first to resolve hidden stream
         active_url = url
-        active_referer = referer or url
-        if not is_direct_file and ("txt/master.txt" not in url and ".m3u8" not in url):
-            try:
-                inspected = self.inspect_web_link(url)
-                if inspected and inspected.get("url") and inspected["url"] != url:
-                    active_url = inspected["url"]
-                    active_referer = inspected.get("referer", active_referer)
-            except Exception:
-                pass
+        active_referer = referer or ""
 
         # Use yt-dlp for all video/audio pages, youtube, social media or when direct file not evident
         if has_yt_dlp and not is_direct_file:
@@ -2029,10 +2032,9 @@ class NashiEngine:
                 "--progress-template", "download:NASHI_PROGRESS:%(progress._percent_str)s|%(progress._speed_str)s",
                 "--windows-filenames",
                 "--trim-filenames", "160",
-                "--downloader", "native",
-                "--hls-use-mpegts",
                 "-o", out_tmpl,
             ]
+            cmd.extend(self._get_js_runtime_args())
             if active_referer:
                 cmd.extend(["--referer", active_referer])
 
@@ -2041,18 +2043,14 @@ class NashiEngine:
             elif mode == "thumbnail":
                 cmd.extend(["--write-thumbnail", "--skip-download"])
             else:
-                # Video: check if specific format_id or max_height is requested
+                # Video: flexible format selection allowing any available container/codec
                 if format_id and format_id not in ("best", "direct"):
-                    fmt_spec = f"{format_id}+bestaudio/best"
+                    cmd.extend(["--format", f"{format_id}+bestaudio/best", "--merge-output-format", "mp4"])
                 elif max_height and max_height > 0:
-                    fmt_spec = f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={max_height}][ext=mp4]/bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"
+                    cmd.extend(["--format", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best", "--merge-output-format", "mp4"])
                 else:
-                    fmt_spec = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+                    cmd.extend(["--format", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"])
 
-                cmd.extend([
-                    "--format", fmt_spec,
-                    "--merge-output-format", "mp4",
-                ])
             cmd.extend(["--print", "after_move:filepath", active_url])
             try:
                 # If progress_callback provided, stream stdout lines to parse percentage
@@ -2091,8 +2089,7 @@ class NashiEngine:
                                         last_raw = raw_pct
 
                                         if stream_num == 1:
-                                            is_two_stream = bool(format_id != "direct" and not (format_id and "/" in str(format_id)))
-                                            pct_val = int(raw_pct * 0.85) if is_two_stream else int(raw_pct)
+                                            pct_val = int(raw_pct * 0.85)
                                             phase = "Video indiriliyor"
                                         else:
                                             pct_val = 85 + int(raw_pct * 0.15)
@@ -2125,6 +2122,13 @@ class NashiEngine:
 
                     p.wait()
                     out = "".join(out_lines)
+
+                    if p.returncode != 0:
+                        err_lines = [l.strip() for l in out_lines if "ERROR:" in l]
+                        err_msg = err_lines[-1] if err_lines else f"İndirme başarısız oldu (kod: {p.returncode})"
+                        if err_msg.startswith("ERROR: "):
+                            err_msg = err_msg[7:]
+                        raise RuntimeError(err_msg)
                 else:
                     out = self._run_cmd(cmd, desc="yt-dlp media download")
 
@@ -2133,22 +2137,33 @@ class NashiEngine:
                     if progress_callback:
                         progress_callback(100, "Tamamlandı! %100")
                     return lines[-1]
-                else:
-                    err_lines = [l for l in out.splitlines() if "ERROR:" in l or "WARNING:" in l]
-                    err_msg = " ".join(err_lines[-2:]) if err_lines else ""
-                    if any(k in active_url.lower() for k in ["instagram.com", "facebook.com", "tiktok.com", "twitter.com", "x.com"]):
-                        if "api is not granting access" in err_msg.lower() or "empty media" in err_msg.lower() or "login" in err_msg.lower():
-                            raise RuntimeError("Instagram oturumsuz video indirmeye izin vermiyor (Meta API bot koruması).")
-                        raise RuntimeError(f"Sosyal medya videosu indirilemedi: {err_msg or 'Video akışına erişilemedi'}")
-                    if any(k in active_url.lower() for k in ["youtube.com", "youtu.be", "vimeo.com", "cdn", "hls", "master"]):
-                        raise RuntimeError(f"Medya indirilemedi: {err_msg or 'Akış bulunamadı'}")
-            except Exception as e:
-                if any(k in active_url.lower() for k in ["instagram.com", "facebook.com", "tiktok.com", "twitter.com", "x.com", "youtube.com", "youtu.be", "vimeo.com", "cdn", "hls", "master"]):
-                    raise RuntimeError(f"Medya indirilemedi ({active_url}): {e}")
 
-        # Social media pages cannot be downloaded via raw HTTP GET fallback (which only yields HTML)
-        if any(k in active_url.lower() for k in ["instagram.com", "facebook.com", "youtube.com", "youtu.be", "tiktok.com", "twitter.com", "x.com"]):
-            raise RuntimeError("Bu platform video dosyasını doğrudan paylaşmıyor (oturum / API koruması devrede).")
+                # Secondary discovery: check destination lines
+                m_dest = re.findall(r'(?:Merging formats into|Destination:)\s+["\']?([^"\']+)["\']?', out)
+                for candidate in reversed(m_dest):
+                    candidate = candidate.strip()
+                    if os.path.exists(candidate):
+                        if progress_callback:
+                            progress_callback(100, "Tamamlandı! %100")
+                        return candidate
+
+                # Tertiary fallback: check most recent file in dest_dir
+                recent_files = sorted(dest_dir.glob("*.*"), key=os.path.getmtime, reverse=True)
+                if recent_files and (time.time() - os.path.getmtime(recent_files[0])) < 30:
+                    if progress_callback:
+                        progress_callback(100, "Tamamlandı! %100")
+                    return str(recent_files[0])
+
+                err_lines = [l for l in out.splitlines() if "ERROR:" in l]
+                if err_lines:
+                    err_msg = err_lines[-1].strip()
+                    if err_msg.startswith("ERROR: "):
+                        err_msg = err_msg[7:]
+                    raise RuntimeError(err_msg)
+                raise RuntimeError("İndirilen medya dosyası diskte bulunamadı.")
+            except Exception as e:
+                # Never silently fallback to urllib for dynamic streaming sites
+                raise e
 
         # Direct HTTP/HTTPS download fallback (with live chunked progress calculation)
         fname = os.path.basename(parsed.path) or "downloaded_media"

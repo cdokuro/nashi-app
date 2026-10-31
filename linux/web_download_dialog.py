@@ -101,6 +101,7 @@ class WebDownloadDialog(QDialog):
         self.inp_url.setPlaceholderText("YouTube, video veya web medya bağlantısını buraya yapıştırın…")
         self.inp_url.setStyleSheet("border: none; background: transparent; font-size: 13px;")
         self.inp_url.returnPressed.connect(self.start_inspection)
+        self.inp_url.textChanged.connect(lambda txt: self.btn_download.setEnabled(bool(txt.strip())))
         u_box.addWidget(self.inp_url, stretch=1)
 
         btn_paste = QPushButton("Yapıştır")
@@ -289,7 +290,7 @@ class WebDownloadDialog(QDialog):
             return
 
         self.btn_inspect.setEnabled(False)
-        self.btn_download.setEnabled(False)
+        self.btn_download.setEnabled(True)
         self.prog_inspect.show()
         self.lbl_media_title.setText("Medya ve mevcut çözünürlükler taranıyor…")
         self.lbl_site_badge.setText("Lütfen bekleyin…")
