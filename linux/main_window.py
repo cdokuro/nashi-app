@@ -16,10 +16,11 @@ from typing import List, Optional, Dict, Any
 if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" and not os.environ.get("QT_QPA_PLATFORM"):
     os.environ["QT_QPA_PLATFORM"] = "xcb"
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
+import time
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl, QThreadPool, QRunnable, QObject
 from PySide6.QtGui import (
     QFont, QKeySequence, QShortcut, QAction, QCursor, QDesktopServices,
-    QColor, QPalette
+    QColor, QPalette, QImage
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -33,7 +34,7 @@ from engine import NashiEngine
 from store import get_store, NashiStore
 from floating_wheel import FloatingRadialWheel
 from artwork import get_theme_palette, NashiArtwork, NashiMarkWidget, FileGardenWidget, THEMES
-from toast_hud import NashiToastHUD, reveal_in_file_manager, copy_files_to_clipboard
+from toast_hud import NashiToastHUD, reveal_in_file_manager, copy_files_to_clipboard, copy_text_to_clipboard
 from float_shelf import FloatShelfWindow
 from editors import CropEditorDialog, ImageEditDialog, MediaTrimDialog
 from web_download_dialog import WebDownloadDialog
@@ -45,7 +46,52 @@ from ipc_and_drag import (
     register_kde_global_shortcuts,
     GlobalDragController,
     NashiIPCServer,
+    WaylandClipboardClient,
+    get_daemon_socket_path,
+    get_wayland_clipboard_client,
 )
+
+
+class ImageWorkerSignals(QObject):
+    finished = Signal(str)
+    error = Signal(str)
+
+
+class ImageSaveWorker(QRunnable):
+    """Encodes and saves a QImage to lossless PNG off the Qt main UI thread."""
+
+    def __init__(self, image: QImage, out_png: str):
+        super().__init__()
+        self.image = image
+        self.out_png = out_png
+        self.signals = ImageWorkerSignals()
+
+    def run(self):
+        try:
+            ok = self.image.save(self.out_png, "PNG")
+            if ok:
+                self.signals.finished.emit(self.out_png)
+            else:
+                self.signals.error.emit("Görsel kaydedilemedi.")
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+
+class ImageCopyWorker(QRunnable):
+    """Copies a cached Wayland image to Nashi imports off the Qt main UI thread."""
+
+    def __init__(self, src_path: str, dst_path: str):
+        super().__init__()
+        self.src_path = src_path
+        self.dst_path = dst_path
+        self.signals = ImageWorkerSignals()
+
+    def run(self):
+        try:
+            shutil.copyfile(self.src_path, self.dst_path)
+            self.signals.finished.emit(self.dst_path)
+        except Exception as e:
+            self.signals.error.emit(str(e))
 
 
 class ConversionWorker(QThread):
@@ -222,8 +268,11 @@ class NashiMainWindow(QMainWindow):
         self.setMinimumSize(860, 640)
         self.resize(920, 700)
 
+        # Wayland Clipboard Client (zero-drop capture without XWayland focus)
+        self.clipboard_client = WaylandClipboardClient(parent=self)
+
         # Floating modules
-        self.floating_wheel = FloatingRadialWheel(engine=self.engine, store=self.store)
+        self.floating_wheel = FloatingRadialWheel(engine=self.engine, store=self.store, clipboard_client=self.clipboard_client)
         self.floating_wheel.action_triggered.connect(self.handle_wheel_action)
 
         self.toast_hud = NashiToastHUD(theme=self.store.get_preference("theme", "dark"))
@@ -237,13 +286,13 @@ class NashiMainWindow(QMainWindow):
         self._drag_release_timer.timeout.connect(self._on_drag_release_timeout)
 
         # Global Drag Controller & IPC Server
-        self.drag_controller = GlobalDragController(store=self.store, parent=self)
+        self.drag_controller = GlobalDragController(store=self.store, parent=self, wheel=self.floating_wheel)
         self.drag_controller.drag_wheel_requested.connect(self._on_global_drag_wheel)
         self.drag_controller.drag_mode_switched.connect(self._on_global_drag_mode_switched)
         self.drag_controller.drag_cursor_moved.connect(self._on_global_drag_cursor_moved)
         self.drag_controller.drag_released.connect(self._on_global_drag_released)
 
-        self.ipc_server = NashiIPCServer(parent=self)
+        self.ipc_server = NashiIPCServer(parent=self, wheel=self.floating_wheel)
         self.ipc_server.command_received.connect(self._on_ipc_command)
         self.ipc_server.cursor_updated.connect(self.drag_controller.update_wayland_cursor)
         self.ipc_server.start()
@@ -839,6 +888,8 @@ class NashiMainWindow(QMainWindow):
         self.activateWindow()
 
     def closeEvent(self, event):
+        if hasattr(self, "clipboard_client") and self.clipboard_client:
+            self.clipboard_client.stop()
         if self.tray.isVisible():
             self.hide()
             event.ignore()
@@ -997,14 +1048,91 @@ class NashiMainWindow(QMainWindow):
         if files:
             self.set_selected_files(files)
 
+    def _on_clipboard_image_imported(self, out_png: str):
+        self.set_selected_files([out_png])
+        self.toast_hud.show_success("Panodan görsel aktarıldı", os.path.basename(out_png), [out_png], 2500)
+
+    def _extract_files_from_text(self, text: str) -> List[str]:
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        if not lines:
+            return []
+        resolved = []
+        for ln in lines:
+            p = None
+            if ln.startswith("file://"):
+                u = QUrl(ln)
+                if u.isLocalFile():
+                    p = u.toLocalFile()
+            elif os.path.isabs(ln):
+                p = ln
+            if p and os.path.exists(p):
+                resolved.append(p)
+            else:
+                return []
+        return resolved
+
     def paste_from_clipboard(self):
-        """Matches Nashi's ClipboardImport.swift: imports copied files, images, text, or web links."""
+        """Imports copied files, images, rich HTML text, plain text, or web links.
+        Subscribes to Wayland daemon UNIX socket payload first to bypass XWayland focus limitations,
+        with non-blocking QThreadPool image processing and graceful Qt clipboard fallback."""
+        imp_dir = self.store.data_dir / "imports"
+        imp_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Inspect Wayland daemon payload first (zero-drop Wayland capture)
+        payload = None
+        if hasattr(self, "clipboard_client") and self.clipboard_client:
+            payload = self.clipboard_client.get_latest_payload()
+
+        if payload:
+            text = (payload.get("text") or "").strip()
+            html = (payload.get("html") or "").strip()
+            image_path = payload.get("image_path")
+
+            # 1.1 Local files listed in text
+            if text:
+                local_files = self._extract_files_from_text(text)
+                if local_files:
+                    self.set_selected_files(local_files)
+                    self.toast_hud.show_success("Panodan dosya alındı", f"{len(local_files)} dosya seçildi", local_files, 2200)
+                    return
+
+            # 1.2 Image from Wayland daemon cache (decoupled copy on QThreadPool)
+            if image_path and os.path.exists(image_path):
+                out_png = str(imp_dir / f"clipboard_image_{int(time.time() * 1000)}.png")
+                worker = ImageCopyWorker(image_path, out_png)
+                worker.signals.finished.connect(self._on_clipboard_image_imported)
+                worker.signals.error.connect(lambda err: self.toast_hud.show_error("Görsel aktarılamadı", err))
+                QThreadPool.globalInstance().start(worker)
+                return
+
+            # 1.3 Web URL in text
+            if text and self.engine.is_web_url(text):
+                self.prompt_download_link(initial_url=text)
+                return
+
+            # 1.4 Rich Text (HTML)
+            if html:
+                out_html = str(imp_dir / f"clipboard_rich_{int(time.time() * 1000)}.html")
+                Path(out_html).write_text(html, encoding="utf-8")
+                self.set_selected_files([out_html])
+                self.toast_hud.show_success("Panodan zengin metin (HTML) aktarıldı", os.path.basename(out_html), [out_html], 2500)
+                return
+
+            # 1.5 Plain Text
+            if text:
+                out_txt = str(imp_dir / f"clipboard_note_{int(time.time() * 1000)}.txt")
+                Path(out_txt).write_text(text, encoding="utf-8")
+                self.set_selected_files([out_txt])
+                self.toast_hud.show_success("Panodan metin aktarıldı", os.path.basename(out_txt), [out_txt], 2500)
+                return
+
+        # 2. Fallback to standard Qt clipboard
         cb = QApplication.clipboard()
         mime = cb.mimeData()
         if not mime:
             return
 
-        # 1. File URLs
+        # 2.1 File URLs
         if mime.hasUrls():
             local_files = [u.toLocalFile() for u in mime.urls() if u.isLocalFile() and os.path.exists(u.toLocalFile())]
             if local_files:
@@ -1012,37 +1140,36 @@ class NashiMainWindow(QMainWindow):
                 self.toast_hud.show_success("Panodan dosya alındı", f"{len(local_files)} dosya seçildi", local_files, 2200)
                 return
 
-        # 2. Image in clipboard -> save lossless PNG in data_dir/imports
+        # 2.2 Image in clipboard -> decouple compression & disk I/O to QThreadPool
         if mime.hasImage():
             img = cb.image()
             if not img.isNull():
-                imp_dir = self.store.data_dir / "imports"
-                imp_dir.mkdir(parents=True, exist_ok=True)
-                out_png = str(imp_dir / "clipboard_image.png")
-                counter = 2
-                while os.path.exists(out_png):
-                    out_png = str(imp_dir / f"clipboard_image_{counter}.png")
-                    counter += 1
-                img.save(out_png, "PNG")
-                self.set_selected_files([out_png])
-                self.toast_hud.show_success("Panodan görsel aktarıldı", os.path.basename(out_png), [out_png], 2500)
+                out_png = str(imp_dir / f"clipboard_image_{int(time.time() * 1000)}.png")
+                worker = ImageSaveWorker(img, out_png)
+                worker.signals.finished.connect(self._on_clipboard_image_imported)
+                worker.signals.error.connect(lambda err: self.toast_hud.show_error("Görsel aktarılamadı", err))
+                QThreadPool.globalInstance().start(worker)
                 return
 
-        # 3. Text or Web URL in clipboard
-        if mime.hasText():
-            txt = mime.text().strip()
-            if not txt:
+        # 2.3 Web URL in clipboard
+        txt = mime.text().strip() if mime.hasText() else ""
+        if txt and self.engine.is_web_url(txt):
+            self.prompt_download_link(initial_url=txt)
+            return
+
+        # 2.4 Rich Text (HTML) in clipboard
+        if mime.hasHtml():
+            html_text = mime.html().strip()
+            if html_text:
+                out_html = str(imp_dir / f"clipboard_rich_{int(time.time() * 1000)}.html")
+                Path(out_html).write_text(html_text, encoding="utf-8")
+                self.set_selected_files([out_html])
+                self.toast_hud.show_success("Panodan zengin metin (HTML) aktarıldı", os.path.basename(out_html), [out_html], 2500)
                 return
-            if self.engine.is_web_url(txt):
-                self.prompt_download_link(initial_url=txt)
-                return
-            imp_dir = self.store.data_dir / "imports"
-            imp_dir.mkdir(parents=True, exist_ok=True)
-            out_txt = str(imp_dir / "clipboard_note.txt")
-            counter = 2
-            while os.path.exists(out_txt):
-                out_txt = str(imp_dir / f"clipboard_note_{counter}.txt")
-                counter += 1
+
+        # 2.5 Plain Text in clipboard
+        if txt:
+            out_txt = str(imp_dir / f"clipboard_note_{int(time.time() * 1000)}.txt")
             Path(out_txt).write_text(txt, encoding="utf-8")
             self.set_selected_files([out_txt])
             self.toast_hud.show_success("Panodan metin aktarıldı", os.path.basename(out_txt), [out_txt], 2500)
@@ -1073,7 +1200,7 @@ class NashiMainWindow(QMainWindow):
         if item_id.startswith("web:"):
             url = files[0] if files else ""
             if item_id == "web:copy":
-                QApplication.clipboard().setText(url)
+                copy_text_to_clipboard(url)
                 self.toast_hud.show_success("Bağlantı kopyalandı", url, [], 2200)
                 return
             if item_id == "web:open":
@@ -1140,7 +1267,7 @@ class NashiMainWindow(QMainWindow):
             return
 
         if action_id == "copyPath":
-            QApplication.clipboard().setText("\n".join(files))
+            copy_text_to_clipboard("\n".join(files))
             self.toast_hud.show_success("Dosya yolu kopyalandı", files[0], files, 2500)
             return
 
@@ -1252,7 +1379,7 @@ class NashiMainWindow(QMainWindow):
         if success:
             if not outputs and detail:
                 # e.g., QR code decoded text
-                QApplication.clipboard().setText(detail)
+                copy_text_to_clipboard(detail)
             self.toast_hud.show_success(title, detail, files=outputs, duration_ms=4200)
             self._refresh_recent_exports()
         else:
@@ -1265,8 +1392,16 @@ class NashiMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Link Download & QR Generation Prompts
     # ------------------------------------------------------------------
+    def get_current_clipboard_text(self) -> str:
+        """Returns clipboard text, prioritizing Wayland daemon socket cache over Qt clipboard."""
+        if hasattr(self, "clipboard_client") and self.clipboard_client:
+            t = self.clipboard_client.get_cached_text()
+            if t:
+                return t.strip()
+        return QApplication.clipboard().text().strip()
+
     def prompt_download_link(self, initial_url: str = ""):
-        cb_text = QApplication.clipboard().text().strip()
+        cb_text = self.get_current_clipboard_text()
         url = initial_url or (cb_text if self.engine.is_web_url(cb_text) else "")
         dlg = WebDownloadDialog(self.engine, parent=self, initial_url=url)
         dlg.download_requested.connect(self._on_web_download_requested)
@@ -1308,7 +1443,7 @@ class NashiMainWindow(QMainWindow):
         self._start_worker("web", item_id, [url], params=params)
 
     def prompt_generate_qr(self):
-        cb_text = QApplication.clipboard().text().strip()
+        cb_text = self.get_current_clipboard_text()
         text, ok = QInputDialog.getText(
             self,
             "QR Kod Oluştur — Nashi",
@@ -1319,11 +1454,7 @@ class NashiMainWindow(QMainWindow):
         if ok and text.strip():
             out_dir = self.store.get_preference("default_output_dir", "") or str(Path.home() / "Downloads")
             Path(out_dir).mkdir(parents=True, exist_ok=True)
-            out_path = str(Path(out_dir) / "nashi_qr.png")
-            counter = 2
-            while os.path.exists(out_path):
-                out_path = str(Path(out_dir) / f"nashi_qr_{counter}.png")
-                counter += 1
+            out_path = str(Path(out_dir) / f"nashi_qr_{int(time.time() * 1000)}.png")
             try:
                 generated = self.engine.generate_qr(text.strip(), output_path=out_path)
                 self.store.add_export("QR Kod", generated, "png", action_title="QR Kod Üret")

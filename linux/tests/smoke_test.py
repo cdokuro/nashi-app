@@ -434,6 +434,99 @@ class NashiSmokeTestSuite(unittest.TestCase):
         win._download_dlg.close()
         win.close()
 
+    # 14. Milestone M3 Zero-Drop, UI Decoupling, HTML Paste & Origin Markers
+    def test_14_m3_zero_drop_and_ui_decoupling(self):
+        import time
+        import shutil
+        from PySide6.QtCore import QThreadPool
+        from PySide6.QtWidgets import QApplication
+        from main_window import NashiMainWindow
+        from toast_hud import copy_files_to_clipboard, copy_text_to_clipboard
+        from ipc_and_drag import NashiDBusBridge, GlobalDragController
+
+        win = NashiMainWindow(start_hidden=True)
+
+        # 1. Origin metadata attachment
+        copy_files_to_clipboard([self.img_a])
+        cb = QApplication.clipboard()
+        mime = cb.mimeData()
+        self.assertTrue(mime.hasFormat("application/x-orkun-origin"))
+        origin_data = bytes(mime.data("application/x-orkun-origin")).decode("utf-8")
+        self.assertIn('"app": "nashi"', origin_data)
+
+        copy_text_to_clipboard("test_origin_text")
+        mime2 = cb.mimeData()
+        self.assertTrue(mime2.hasFormat("application/x-orkun-origin"))
+        self.assertIn('"app": "nashi"', bytes(mime2.data("application/x-orkun-origin")).decode("utf-8"))
+
+        # 2. Suppress cursor DBus emissions when radial wheel is hidden
+        bridge = NashiDBusBridge(wheel=win.floating_wheel)
+        cursor_events = []
+        bridge.cursor_updated.connect(lambda x, y: cursor_events.append((x, y)))
+
+        self.assertFalse(win.floating_wheel.isVisible())
+        bridge.updateCursorPos(150, 250)
+        self.assertEqual(len(cursor_events), 0)  # Suppressed when hidden!
+
+        win.floating_wheel.show()
+        bridge.updateCursorPos(150, 250)
+        self.assertEqual(len(cursor_events), 1)  # Emitted when visible!
+        self.assertEqual(cursor_events[0], (150, 250))
+        win.floating_wheel.hide()
+
+        # 3. Rich text (HTML) paste in paste_from_clipboard()
+        win.clipboard_client._latest_payload = {
+            "seq": 101,
+            "timestamp": int(time.time() * 1000),
+            "types": ["text/html", "text/plain"],
+            "text": "Plain fallback text",
+            "html": "<article><h1>Rich Format Wayland</h1><p>Preserved HTML styling</p></article>",
+            "image_path": None,
+            "origin": "external",
+        }
+        win.paste_from_clipboard()
+        self.assertTrue(len(win.selected_files) > 0)
+        html_file = win.selected_files[0]
+        self.assertTrue(html_file.endswith(".html"))
+        self.assertIn("clipboard_rich_", html_file)
+        self.assertTrue(os.path.exists(html_file))
+        self.assertIn("Rich Format Wayland", Path(html_file).read_text(encoding="utf-8"))
+
+        # 4. Decoupled image import with QThreadPool
+        cached_png = str(Path(self.tmp_dir.name) / "test_m3_daemon_cache.png")
+        shutil.copyfile(self.img_a, cached_png)
+        win.clipboard_client._latest_payload = {
+            "seq": 102,
+            "timestamp": int(time.time() * 1000),
+            "types": ["image/png"],
+            "text": None,
+            "html": None,
+            "image_path": cached_png,
+            "origin": "external",
+        }
+        win.paste_from_clipboard()
+        # Wait for background QThreadPool worker to complete
+        QThreadPool.globalInstance().waitForDone(2000)
+        QApplication.processEvents()
+        self.assertTrue(len(win.selected_files) > 0)
+        imported_img = win.selected_files[0]
+        self.assertTrue(imported_img.endswith(".png"))
+        self.assertIn("clipboard_image_", imported_img)
+        self.assertTrue(os.path.exists(imported_img))
+
+        # 5. Loopback echo suppression for origin 'nashi'
+        initial_payload = dict(win.clipboard_client.get_latest_payload())
+        win.clipboard_client._handle_record({
+            "seq": 103,
+            "timestamp": int(time.time() * 1000),
+            "types": ["text/plain"],
+            "text": "Loopback should be ignored",
+            "origin": "nashi",
+        })
+        self.assertEqual(win.clipboard_client.get_latest_payload(), initial_payload)
+
+        win.close()
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(NashiSmokeTestSuite)

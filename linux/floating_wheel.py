@@ -10,7 +10,7 @@ Ported from Wheel.swift and GlobalDragController.cs (GlobalDropWheel):
 import os
 from pathlib import Path
 from typing import List, Optional, Tuple
-from PySide6.QtCore import Qt, QPoint, QPointF, QTimer, Signal, QEvent
+from PySide6.QtCore import Qt, QPoint, QPointF, QTimer, Signal, QEvent, QUrl
 from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
 
@@ -32,10 +32,12 @@ class FloatingRadialWheel(QWidget):
         engine: Optional[NashiEngine] = None,
         store: Optional[NashiStore] = None,
         parent=None,
+        clipboard_client=None,
     ):
         super().__init__(parent)
         self.engine = engine or NashiEngine()
         self.store = store or get_store()
+        self.clipboard_client = clipboard_client
 
         self.current_mode: str = "convert"  # 'convert', 'tools', 'actions'
         self.current_files: List[str] = []
@@ -213,6 +215,53 @@ class FloatingRadialWheel(QWidget):
         self.wheel.update_hover_at(QPointF(local_pt))
 
     def _inspect_clipboard_fallback(self):
+        # 1. Inspect Wayland clipboard daemon cache first to bypass XWayland focus limitations
+        client = self.clipboard_client
+        if client is None:
+            try:
+                from ipc_and_drag import get_wayland_clipboard_client
+                client = get_wayland_clipboard_client()
+            except Exception:
+                client = None
+
+        if client is not None:
+            payload = client.get_latest_payload()
+            if payload:
+                # Check for cached image
+                img_p = payload.get("image_path")
+                if img_p and os.path.exists(img_p):
+                    self.current_files = [img_p]
+                    self.current_web_url = None
+                    return
+
+                # Check for files or web URL in text
+                text = (payload.get("text") or "").strip()
+                if text:
+                    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                    resolved = []
+                    for ln in lines:
+                        p = None
+                        if ln.startswith("file://"):
+                            u = QUrl(ln)
+                            if u.isLocalFile():
+                                p = u.toLocalFile()
+                        elif os.path.isabs(ln):
+                            p = ln
+                        if p and os.path.exists(p):
+                            resolved.append(p)
+                        else:
+                            resolved = []
+                            break
+                    if resolved:
+                        self.current_files = resolved
+                        self.current_web_url = None
+                        return
+
+                    if self.engine.is_web_url(text):
+                        self.current_web_url = text
+                        return
+
+        # 2. Fallback to standard Qt QApplication.clipboard()
         cb = QApplication.clipboard()
         mime = cb.mimeData()
         if not mime:

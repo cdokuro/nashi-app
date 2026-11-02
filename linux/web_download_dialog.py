@@ -62,8 +62,15 @@ class WebDownloadDialog(QDialog):
             self.inp_url.setText(initial_url.strip())
             QTimer.singleShot(100, self.start_inspection)
         else:
-            # Check clipboard for valid media URL
-            cb = QApplication.clipboard().text().strip()
+            # Check clipboard for valid media URL (Wayland daemon cache first)
+            cb = ""
+            try:
+                from ipc_and_drag import get_wayland_clipboard_client
+                cb = (get_wayland_clipboard_client().get_cached_text() or "").strip()
+            except Exception:
+                pass
+            if not cb:
+                cb = QApplication.clipboard().text().strip()
             if cb and self.engine.is_web_url(cb):
                 self.inp_url.setText(cb)
                 QTimer.singleShot(100, self.start_inspection)
@@ -269,7 +276,14 @@ class WebDownloadDialog(QDialog):
         """)
 
     def _paste_clipboard(self):
-        txt = QApplication.clipboard().text().strip()
+        txt = ""
+        try:
+            from ipc_and_drag import get_wayland_clipboard_client
+            txt = (get_wayland_clipboard_client().get_cached_text() or "").strip()
+        except Exception:
+            pass
+        if not txt:
+            txt = QApplication.clipboard().text().strip()
         if txt:
             self.inp_url.setText(txt)
             self.start_inspection()

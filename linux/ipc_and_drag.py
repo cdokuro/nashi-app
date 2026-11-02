@@ -11,6 +11,8 @@ import json
 import os
 import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Optional, Callable, Tuple
 
@@ -23,6 +25,148 @@ from store import NashiStore, get_store
 def get_ipc_socket_path() -> str:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
     return os.path.join(runtime_dir, "nashi-ipc.sock")
+
+
+def get_daemon_socket_path() -> str:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return os.path.join(runtime_dir, "orkun-clipboard.sock")
+
+
+class WaylandClipboardClient(QObject):
+    """
+    Subscribes to orkun-clipboard-daemon UNIX domain streaming socket
+    ($XDG_RUNTIME_DIR/orkun-clipboard.sock).
+    Eliminates XWayland window focus dependency by caching the latest
+    Wayland clipboard payload (text, rich HTML, image_path, types, origin).
+    """
+
+    payload_received = Signal(dict)
+    connection_changed = Signal(bool)
+
+    def __init__(self, parent=None, socket_path: Optional[str] = None):
+        super().__init__(parent)
+        self.socket_path = socket_path or get_daemon_socket_path()
+        self._lock = threading.Lock()
+        self._latest_payload: Optional[dict] = None
+        self._is_connected: bool = False
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.start()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="WaylandClipboardClient")
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._is_connected
+
+    def get_latest_payload(self) -> Optional[dict]:
+        with self._lock:
+            if self._latest_payload is None:
+                return None
+            return dict(self._latest_payload)
+
+    def get_cached_text(self) -> Optional[str]:
+        p = self.get_latest_payload()
+        if p and p.get("text"):
+            return p["text"]
+        return None
+
+    def get_cached_html(self) -> Optional[str]:
+        p = self.get_latest_payload()
+        if p and p.get("html"):
+            return p["html"]
+        return None
+
+    def get_cached_image_path(self) -> Optional[str]:
+        p = self.get_latest_payload()
+        if p and p.get("image_path") and os.path.exists(p["image_path"]):
+            return p["image_path"]
+        return None
+
+    def clear(self):
+        with self._lock:
+            self._latest_payload = None
+
+    def _set_connected(self, connected: bool):
+        with self._lock:
+            if self._is_connected == connected:
+                return
+            self._is_connected = connected
+        self.connection_changed.emit(connected)
+
+    def _worker_loop(self):
+        while not self._stop_event.is_set():
+            if not os.path.exists(self.socket_path):
+                self._set_connected(False)
+                self._stop_event.wait(0.5)
+                continue
+
+            s = None
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(2.0)
+                s.connect(self.socket_path)
+                self._set_connected(True)
+                buffer = ""
+
+                while not self._stop_event.is_set():
+                    try:
+                        chunk = s.recv(65536)
+                        if not chunk:
+                            break
+                        buffer += chunk.decode("utf-8", errors="replace")
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                record = json.loads(line)
+                                self._handle_record(record)
+                            except Exception:
+                                pass
+                    except socket.timeout:
+                        continue
+                    except (socket.error, OSError):
+                        break
+            except Exception:
+                pass
+            finally:
+                if s:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                self._set_connected(False)
+
+            self._stop_event.wait(0.5)
+
+    def _handle_record(self, record: dict):
+        # Ignore our own loopback copies
+        if record.get("origin") == "nashi":
+            return
+
+        with self._lock:
+            self._latest_payload = record
+
+        self.payload_received.emit(record)
+
+
+_g_wayland_clipboard_client: Optional[WaylandClipboardClient] = None
+
+def get_wayland_clipboard_client() -> WaylandClipboardClient:
+    global _g_wayland_clipboard_client
+    if _g_wayland_clipboard_client is None:
+        _g_wayland_clipboard_client = WaylandClipboardClient()
+    return _g_wayland_clipboard_client
 
 
 def send_ipc_command(cmd: str, mode: str = "", files: Optional[list] = None, timeout_ms: int = 800) -> bool:
@@ -218,12 +362,23 @@ class NashiDBusBridge(QObject):
     triggered = Signal(str, int, int)
     cursor_updated = Signal(int, int)
 
+    def __init__(self, parent=None, wheel=None):
+        super().__init__(parent)
+        self.wheel = wheel
+
     @Slot(str, int, int)
     def triggerWheelAt(self, mode: str, x: int, y: int):
         self.triggered.emit(mode, x, y)
 
     @Slot(int, int)
     def updateCursorPos(self, x: int, y: int):
+        # Suppress cursor DBus emissions when radial wheel is hidden
+        if self.wheel is not None:
+            try:
+                if not self.wheel.isVisible():
+                    return
+            except Exception:
+                pass
         self.cursor_updated.emit(x, y)
 
 
@@ -243,9 +398,10 @@ class GlobalDragController(QObject):
     drag_cursor_moved = Signal(int, int)           # (cursor_x, cursor_y)
     drag_released = Signal()
 
-    def __init__(self, store: Optional[NashiStore] = None, parent=None, start_polling: bool = True):
+    def __init__(self, store: Optional[NashiStore] = None, parent=None, start_polling: bool = True, wheel=None):
         super().__init__(parent)
         self.store = store or get_store()
+        self.wheel = wheel
 
         self._display = None
         self._root = None
@@ -266,6 +422,12 @@ class GlobalDragController(QObject):
             self._timer.start()
 
     def update_wayland_cursor(self, x: int, y: int):
+        if self.wheel is not None:
+            try:
+                if not self.wheel.isVisible():
+                    return
+            except Exception:
+                pass
         self._wayland_cursor = (int(x), int(y))
 
     def _init_xlib(self):
@@ -426,13 +588,18 @@ class NashiIPCServer(QObject):
     command_received = Signal(str, str, list, object)  # (cmd, mode, files, cursor_tuple_or_none)
     cursor_updated = Signal(int, int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, wheel=None):
         super().__init__(parent)
         self.sock_path = get_ipc_socket_path()
         self.server = QLocalServer(self)
-        self.dbus_bridge = NashiDBusBridge(self)
+        self.wheel = wheel
+        self.dbus_bridge = NashiDBusBridge(self, wheel=wheel)
         self.dbus_bridge.triggered.connect(self._on_dbus_triggered)
         self.dbus_bridge.cursor_updated.connect(self.cursor_updated)
+
+    def set_wheel(self, wheel):
+        self.wheel = wheel
+        self.dbus_bridge.wheel = wheel
 
     def start(self) -> bool:
         self.server.close()

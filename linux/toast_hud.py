@@ -46,10 +46,10 @@ def reveal_in_file_manager(file_paths: List[str]):
     subprocess.Popen(["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def copy_files_to_clipboard(file_paths: List[str]):
+def copy_files_to_clipboard(file_paths: List[str]) -> Optional[QMimeData]:
     """Copies file URIs and paths to the system clipboard so user can Ctrl+V in Dolphin/apps."""
     if not file_paths:
-        return
+        return None
     cb = QApplication.clipboard()
     mime = QMimeData()
     urls = [QUrl.fromLocalFile(str(Path(p).resolve())) for p in file_paths if os.path.exists(p)]
@@ -58,7 +58,23 @@ def copy_files_to_clipboard(file_paths: List[str]):
         gnome_lines = ["copy"] + [u.toEncoded().data().decode("utf-8") for u in urls]
         mime.setData("x-special/gnome-copied-files", "\n".join(gnome_lines).encode("utf-8"))
     mime.setText("\n".join(file_paths))
-    cb.setMimeData(mime)
+    mime.setData("application/x-orkun-origin", b'{"app": "nashi"}')
+    if cb:
+        cb.setMimeData(mime)
+    return mime
+
+
+def copy_text_to_clipboard(text: str) -> Optional[QMimeData]:
+    """Copies plain text to system clipboard with Nashi origin marker."""
+    if text is None:
+        return None
+    cb = QApplication.clipboard()
+    mime = QMimeData()
+    mime.setText(text)
+    mime.setData("application/x-orkun-origin", b'{"app": "nashi"}')
+    if cb:
+        cb.setMimeData(mime)
+    return mime
 
 
 class NashiToastHUD(QWidget):
