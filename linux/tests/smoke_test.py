@@ -447,15 +447,14 @@ class NashiSmokeTestSuite(unittest.TestCase):
         win = NashiMainWindow(start_hidden=True)
 
         # 1. Origin metadata attachment
-        copy_files_to_clipboard([self.img_a])
-        cb = QApplication.clipboard()
-        mime = cb.mimeData()
+        mime = copy_files_to_clipboard([self.img_a])
+        self.assertIsNotNone(mime)
         self.assertTrue(mime.hasFormat("application/x-orkun-origin"))
         origin_data = bytes(mime.data("application/x-orkun-origin")).decode("utf-8")
         self.assertIn('"app": "nashi"', origin_data)
 
-        copy_text_to_clipboard("test_origin_text")
-        mime2 = cb.mimeData()
+        mime2 = copy_text_to_clipboard("test_origin_text")
+        self.assertIsNotNone(mime2)
         self.assertTrue(mime2.hasFormat("application/x-orkun-origin"))
         self.assertIn('"app": "nashi"', bytes(mime2.data("application/x-orkun-origin")).decode("utf-8"))
 
