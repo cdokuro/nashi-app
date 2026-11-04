@@ -935,7 +935,11 @@ class NashiMainWindow(QMainWindow):
 
         coords = cursor_pos if isinstance(cursor_pos, tuple) else None
 
-        if cmd == "toggle":
+        if cmd == "ping":
+            return
+        elif cmd == "show":
+            self.bring_to_front()
+        elif cmd == "toggle":
             if self.isVisible() and self.isActiveWindow():
                 self.hide()
             else:
@@ -1836,6 +1840,7 @@ def main():
     # Determine requested mode from CLI flags
     req_cmd = ""
     req_mode = "convert"
+    start_hidden = any(a in args for a in ("--daemon", "--hidden", "--tray"))
     if "--convert" in args or "--wheel" in args:
         req_cmd = "wheel"
         req_mode = "convert"
@@ -1847,15 +1852,21 @@ def main():
         req_mode = "actions"
     elif "--toggle" in args:
         req_cmd = "toggle"
+    elif "--show" in args:
+        req_cmd = "show"
     elif "--float" in args:
         req_cmd = "float"
     elif "--download-link" in args:
         req_cmd = "download_link"
 
     # If an instance of Nashi is already running, forward the command over IPC socket and exit immediately!
+    if start_hidden and send_ipc_command("ping"):
+        return
     if req_cmd and send_ipc_command(req_cmd, mode=req_mode, files=file_args):
         return
     if not req_cmd and file_args and send_ipc_command("wheel", mode="convert", files=file_args):
+        return
+    if not req_cmd and not file_args and not start_hidden and send_ipc_command("show"):
         return
 
     # Configure KDE Wayland XWayland eavesdrop & global shortcuts
@@ -1867,7 +1878,7 @@ def main():
     app.setApplicationName("Nashi")
     app.setQuitOnLastWindowClosed(False)
 
-    start_hidden = ("--daemon" in args) or bool(req_cmd == "wheel")
+    start_hidden = start_hidden or bool(req_cmd == "wheel")
     window = NashiMainWindow(start_hidden=start_hidden)
     if file_args:
         window.set_selected_files(file_args)
@@ -1878,7 +1889,7 @@ def main():
     elif req_cmd == "float":
         window.hide()
         QTimer.singleShot(80, lambda: window.float_shelf.add_files(file_args, show_shelf=True))
-    elif "--daemon" in args:
+    elif start_hidden:
         window.hide()
     else:
         window.show()
