@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
 from wheel_widget import RadialWheelWidget, WheelItem
 from engine import NashiEngine
 from store import NashiStore, get_store
+from cursor_source import global_cursor_pos  # XWayland: QCursor.pos() donuk kalır
 
 
 class FloatingRadialWheel(QWidget):
@@ -170,7 +171,7 @@ class FloatingRadialWheel(QWidget):
             cx, cy = cursor_pos
             pos = QPoint(int(cx), int(cy))
         else:
-            pos = QCursor.pos()
+            pos = global_cursor_pos()
 
         # Clamp within screen bounds so the wheel is never cut off
         screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()

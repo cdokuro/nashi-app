@@ -34,6 +34,7 @@ from engine import NashiEngine
 from store import get_store, NashiStore
 from floating_wheel import FloatingRadialWheel
 from artwork import get_theme_palette, NashiArtwork, NashiMarkWidget, FileGardenWidget, THEMES
+import cursor_source
 from toast_hud import NashiToastHUD, reveal_in_file_manager, copy_files_to_clipboard, copy_text_to_clipboard
 from float_shelf import FloatShelfWindow
 from editors import CropEditorDialog, ImageEditDialog, MediaTrimDialog
@@ -295,6 +296,8 @@ class NashiMainWindow(QMainWindow):
         self.ipc_server = NashiIPCServer(parent=self, wheel=self.floating_wheel)
         self.ipc_server.command_received.connect(self._on_ipc_command)
         self.ipc_server.cursor_updated.connect(self.drag_controller.update_wayland_cursor)
+        # KWin'in gerçek imleç akışını her zaman sakla (raf/toast/çark doğru monitörde açılsın)
+        self.ipc_server.cursor_updated.connect(cursor_source.update)
         self.ipc_server.start()
 
         self._init_ui()

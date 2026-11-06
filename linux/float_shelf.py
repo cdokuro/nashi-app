@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from artwork import get_theme_palette, NashiArtwork
 from toast_hud import reveal_in_file_manager, copy_files_to_clipboard
+from cursor_source import global_cursor_pos  # XWayland: QCursor.pos() donuk kalır
 
 
 class DraggableShelfList(QListWidget):
@@ -205,7 +206,7 @@ class FloatShelfWindow(QWidget):
         self._refresh_list()
         if show_shelf:
             if not self.isVisible():
-                pos = QCursor.pos()
+                pos = global_cursor_pos()
                 screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
                 if screen:
                     avail = screen.availableGeometry()

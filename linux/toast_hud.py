@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from artwork import get_theme_palette, NashiMarkWidget
+from cursor_source import global_cursor_pos  # XWayland: QCursor.pos() donuk kalır
 
 
 def reveal_in_file_manager(file_paths: List[str]):
@@ -212,7 +213,7 @@ class NashiToastHUD(QWidget):
         self.update()
 
     def _position_on_screen(self):
-        pos = QCursor.pos()
+        pos = global_cursor_pos()
         screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
         if screen:
             avail = screen.availableGeometry()
