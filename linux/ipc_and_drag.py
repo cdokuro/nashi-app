@@ -205,6 +205,12 @@ def send_ipc_command(cmd: str, mode: str = "", files: Optional[list] = None, tim
     return False
 
 
+# Açılışta (QApplication'dan önce) çalışan KWin/kconfig çağrıları: KWin veya
+# qdbus6 takılırsa Nashi hiç açılmasın diye her biri sınırlı. Zaman aşımı
+# (TimeoutExpired) mevcut except blokları tarafından yakalanır, açılış sürer.
+KDE_STARTUP_TIMEOUT_S = 2
+
+
 def ensure_kde_xwayland_eavesdrop():
     """
     Configures KWin Wayland so XWayland receives modifier + mouse button state
@@ -217,28 +223,28 @@ def ensure_kde_xwayland_eavesdrop():
         cur_mode = subprocess.run(
             ["kreadconfig6", "--file", "kwinrc", "--group", "Xwayland", "--key", "XwaylandEavesdrops"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-        ).stdout.strip()
+, timeout=KDE_STARTUP_TIMEOUT_S).stdout.strip()
         cur_mouse = subprocess.run(
             ["kreadconfig6", "--file", "kwinrc", "--group", "Xwayland", "--key", "XwaylandEavesdropsMouse"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-        ).stdout.strip()
+, timeout=KDE_STARTUP_TIMEOUT_S).stdout.strip()
 
         need_reconf = False
         if cur_mode not in ("Modifiers", "All"):
             subprocess.run(
                 ["kwriteconfig6", "--file", "kwinrc", "--group", "Xwayland", "--key", "XwaylandEavesdrops", "All"],
                 stderr=subprocess.DEVNULL
-            )
+, timeout=KDE_STARTUP_TIMEOUT_S)
             need_reconf = True
         if cur_mouse.lower() != "true":
             subprocess.run(
                 ["kwriteconfig6", "--file", "kwinrc", "--group", "Xwayland", "--key", "XwaylandEavesdropsMouse", "true"],
                 stderr=subprocess.DEVNULL
-            )
+, timeout=KDE_STARTUP_TIMEOUT_S)
             need_reconf = True
 
         if need_reconf:
-            subprocess.run(["qdbus6", "org.kde.KWin", "/KWin", "reconfigure"], stderr=subprocess.DEVNULL)
+            subprocess.run(["qdbus6", "org.kde.KWin", "/KWin", "reconfigure"], stderr=subprocess.DEVNULL, timeout=KDE_STARTUP_TIMEOUT_S)
     except Exception as e:
         print(f"[NashiIPC] KWin Xwayland config warning: {e}")
 
@@ -343,15 +349,15 @@ registerShortcut("NashiToggleWindow", "Nashi: Ana Pencere Aç/Gizle (Alt+Shift+N
         subprocess.run(
             ["qdbus6", "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.unloadScript", "nashi_kwin_bridge"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+, timeout=KDE_STARTUP_TIMEOUT_S)
         subprocess.run(
             ["qdbus6", "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.loadScript", str(kwin_js_path), "nashi_kwin_bridge"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+, timeout=KDE_STARTUP_TIMEOUT_S)
         subprocess.run(
             ["qdbus6", "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.start"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+, timeout=KDE_STARTUP_TIMEOUT_S)
     except Exception as e:
         print(f"[NashiIPC] KWin script registration warning: {e}")
 
