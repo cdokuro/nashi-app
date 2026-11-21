@@ -190,14 +190,26 @@ class ConversionWorker(QThread):
                     params=self.params,
                 )
                 tool_title = self.engine.get_tool_name(tool_id, lang=self.store.get_preference("language", "tr"))
-                for out in outputs:
+                # Compress hands back the untouched original when its result was not smaller.
+                kept = [o for o in outputs if any(self.engine.is_original_kept(f, o) for f in self.files)]
+                made = [o for o in outputs if o not in kept]
+                for out in made:
                     src_label = os.path.basename(self.files[0]) if self.files else "Dosya"
                     ext = os.path.splitext(out)[1].lstrip(".") or "dir"
                     self.store.add_export(src_label, out, ext, action_title=tool_title)
 
-                if outputs:
-                    title = f"{tool_title} tamamlandı ({len(outputs)} çıktı)."
-                    detail = os.path.basename(outputs[0])
+                if kept and not made:
+                    detail = (
+                        f"{os.path.basename(kept[0])} zaten yeterince küçük; daha büyük bir kopya yazılmadı."
+                        if len(kept) == 1
+                        else f"{len(kept)} dosya zaten yeterince küçük; daha büyük kopyalar yazılmadı."
+                    )
+                    self.finished.emit(True, f"{tool_title}: orijinal korundu.", detail, kept)
+                elif outputs:
+                    title = f"{tool_title} tamamlandı ({len(made)} çıktı)."
+                    detail = os.path.basename(made[0])
+                    if kept:
+                        detail += f" · {len(kept)} dosya zaten küçüktü, orijinali korundu"
                     self.finished.emit(True, title, detail, outputs)
                 else:
                     self.finished.emit(False, f"{tool_title} başarısız", "Çıktı üretilemedi.", [])

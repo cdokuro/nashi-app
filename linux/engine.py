@@ -1219,7 +1219,33 @@ class NashiEngine:
         else:
             raise NotImplementedError(f"Compression not implemented for format: {ext}")
 
+        return self._retain_smaller_original(input_path, output_path)
+
+    @staticmethod
+    def _retain_smaller_original(input_path: str, output_path: str) -> str:
+        """Upstream parity (OutputFiles.retainSmallerOriginal): a compressed copy
+        that is not smaller than its source is worthless, so delete it and hand
+        back the untouched original. Callers detect this with is_original_kept()."""
+        try:
+            original = os.path.getsize(input_path)
+            encoded = os.path.getsize(output_path)
+        except OSError:
+            return output_path
+        if original > 0 and encoded >= original:
+            try:
+                os.remove(output_path)
+            except OSError:
+                return output_path
+            return input_path
         return output_path
+
+    @staticmethod
+    def is_original_kept(input_path: str, output_path: str) -> bool:
+        """True when a tool returned the input itself (e.g. compress kept the original)."""
+        try:
+            return os.path.realpath(input_path) == os.path.realpath(output_path)
+        except (OSError, ValueError):
+            return False
 
     def remove_metadata(self, input_path: str, output_path: Optional[str] = None, output_dir: Optional[str] = None) -> str:
         if not os.path.exists(input_path):
