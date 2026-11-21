@@ -4,6 +4,7 @@ Canlı oturuma dokunmamak için Qt'den önce offscreen platform ve geçici
 HOME / XDG_* dizinleri ayarlanır. Bu modül her test dosyasının en başında
 içe aktarılmalıdır.
 """
+import atexit
 import os
 import shutil
 import sys
@@ -12,6 +13,7 @@ import unittest
 from pathlib import Path
 
 _SANDBOX = Path(tempfile.mkdtemp(prefix="nashi-wave1-"))
+atexit.register(shutil.rmtree, _SANDBOX, ignore_errors=True)
 for _sub in ("home", "cfg", "data", "run"):
     (_SANDBOX / _sub).mkdir(mode=0o700, exist_ok=True)
 
