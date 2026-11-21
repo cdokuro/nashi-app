@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -37,6 +38,11 @@ VIDEO_FORMATS = {
 ARCHIVE_FORMATS = {
     "zip", "tar", "gz", "tgz", "bz2", "rar"
 }
+
+# Extraction safety limits (upstream ArchiveCodec.ExtractionLimits)
+ARCHIVE_MAX_ENTRIES = 100_000
+ARCHIVE_MAX_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB expanded
+_ARCHIVE_CHUNK = 128 * 1024
 
 DOC_FORMATS = {
     "pdf", "txt", "md", "html", "docx", "pages", "rtf", "rtfd", "textclipping",
@@ -1356,21 +1362,274 @@ class NashiEngine:
         arch = Path(archive_path).resolve()
         dest = Path(output_dir).resolve() if output_dir else arch.parent / f"{arch.stem}_extracted"
         dest.mkdir(parents=True, exist_ok=True)
+        dest = dest.resolve()
 
-        if zipfile.is_zipfile(arch):
-            with zipfile.ZipFile(arch, "r") as z:
-                z.extractall(dest)
+        with open(arch, "rb") as fh:
+            magic = fh.read(8)
+
+        if magic.startswith(b"Rar!\x1a\x07"):
+            self._extract_rar(arch, dest)
+        elif zipfile.is_zipfile(arch):
+            self._extract_zip(arch, dest)
         elif tarfile.is_tarfile(arch):
-            with tarfile.open(arch, "r:*") as t:
-                t.extractall(dest)
+            self._extract_tar(arch, dest)
         elif str(arch).lower().endswith(".gz"):
             out_file = dest / arch.stem
+            self._check_archive_destination(dest, out_file)
             with gzip.open(arch, "rb") as f_in, open(out_file, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
+                self._copy_limited(f_in, f_out, 0)
         else:
             shutil.unpack_archive(str(arch), str(dest))
 
         return str(dest)
+
+    # --- archive safety helpers (upstream ArchiveCodec parity) -------------
+    @staticmethod
+    def _archive_limit_error(kind: str) -> ValueError:
+        if kind == "entries":
+            return ValueError(f"Arşivde çok fazla öge var ({ARCHIVE_MAX_ENTRIES:,} sınırı).".replace(",", "."))
+        gb = ARCHIVE_MAX_BYTES / (1024 ** 3)
+        return ValueError(f"Arşiv açıldığında {gb:g} GB güvenlik sınırını aşıyor.")
+
+    @staticmethod
+    def _safe_member_path(name: str, root: Path) -> Optional[Path]:
+        """Maps an archive member name to a path inside root, refusing absolute
+        paths and '..' (path traversal). Returns None for the root itself."""
+        normalized = name.replace("\\", "/")
+        if not normalized or "\0" in normalized or normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+            raise ValueError(f"Arşivde mutlak bir yol var: {name}")
+        parts = [p for p in normalized.split("/") if p not in ("", ".")]
+        if ".." in parts:
+            raise ValueError(f"Arşivde çıkarma klasörünün dışına çıkan bir yol var: {name}")
+        if not parts:
+            return None
+        return root.joinpath(*parts)
+
+    @staticmethod
+    def _check_archive_destination(root: Path, target: Path) -> None:
+        """No component below root may be a symlink (entries must not be written through links)."""
+        rel = target.relative_to(root)
+        cur = root
+        for part in rel.parts:
+            cur = cur / part
+            if cur.is_symlink():
+                raise ValueError(f"Arşiv ögesi sembolik bağ üzerinden yazılamaz: {rel}")
+            if not cur.exists():
+                return
+
+    @staticmethod
+    def _link_target_inside(root: Path, link_path: Path, target: str) -> bool:
+        if not target or target.startswith("/") or "\\" in target or re.match(r"^[A-Za-z]:", target):
+            return False
+        resolved = os.path.normpath(os.path.join(str(link_path.parent), target))
+        base = str(root)
+        return resolved == base or resolved.startswith(base + os.sep)
+
+    @staticmethod
+    def _copy_limited(src, dst, expanded: int) -> int:
+        while True:
+            chunk = src.read(_ARCHIVE_CHUNK)
+            if not chunk:
+                return expanded
+            expanded += len(chunk)
+            if expanded > ARCHIVE_MAX_BYTES:
+                raise NashiEngine._archive_limit_error("bytes")
+            dst.write(chunk)
+
+    def _extract_zip(self, arch: Path, root: Path) -> None:
+        with zipfile.ZipFile(arch, "r") as z:
+            infos = z.infolist()
+            if len(infos) > ARCHIVE_MAX_ENTRIES:
+                raise self._archive_limit_error("entries")
+            if sum(i.file_size for i in infos) > ARCHIVE_MAX_BYTES:
+                raise self._archive_limit_error("bytes")
+
+            expanded = 0
+            seen = set()
+            dirs: List[Tuple[Path, int, float]] = []
+            links: List[Tuple[Path, str]] = []
+            for info in infos:
+                target = self._safe_member_path(info.filename, root)
+                if target is None:
+                    continue
+                self._check_archive_destination(root, target)
+                unix_mode = (info.external_attr >> 16) if info.create_system == 3 else 0
+                kind = stat.S_IFMT(unix_mode)
+                perm = stat.S_IMODE(unix_mode) & 0o777
+                try:
+                    mtime = time.mktime(info.date_time + (0, 0, -1))  # DOS time is local time
+                except (OverflowError, ValueError):
+                    mtime = 0.0
+
+                if info.is_dir() or kind == stat.S_IFDIR:
+                    target.mkdir(parents=True, exist_ok=True)
+                    dirs.append((target, perm, mtime))
+                    continue
+                if kind == stat.S_IFLNK:
+                    link_to = z.read(info).decode("utf-8", errors="strict")
+                    if not self._link_target_inside(root, target, link_to):
+                        raise ValueError(f"Arşivdeki bağ çıkarma klasörünün dışını gösteriyor: {info.filename}")
+                    links.append((target, link_to))
+                    continue
+                if kind not in (0, stat.S_IFREG):
+                    raise ValueError(f"Arşivde desteklenmeyen özel dosya var: {info.filename}")
+                if target in seen:
+                    raise ValueError(f"Arşivde aynı yol iki kez var: {info.filename}")
+                seen.add(target)
+
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(info, "r") as src, open(target, "wb") as dst:
+                    expanded = self._copy_limited(src, dst, expanded)
+                if perm:
+                    os.chmod(target, perm)
+                if mtime > 0:
+                    os.utime(target, (mtime, mtime))
+
+            for link_path, link_to in links:
+                self._check_archive_destination(root, link_path)
+                link_path.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(link_to, link_path)
+            for link_path, _ in links:
+                real = os.path.realpath(link_path)
+                if not (real == str(root) or real.startswith(str(root) + os.sep)):
+                    os.unlink(link_path)
+                    raise ValueError("Arşivdeki bağ çıkarma klasörünün dışını gösteriyor.")
+
+            # Folders last: writing their children changes their mtime. The owner
+            # keeps full access so later entries, conversion and cleanup still work.
+            for d, perm, mtime in sorted(dirs, key=lambda x: len(x[0].parts), reverse=True):
+                if perm:
+                    os.chmod(d, perm | 0o700)
+                if mtime > 0:
+                    os.utime(d, (mtime, mtime))
+
+    def _extract_tar(self, arch: Path, root: Path) -> None:
+        with tarfile.open(arch, "r:*") as t:
+            members = t.getmembers()
+            if len(members) > ARCHIVE_MAX_ENTRIES:
+                raise self._archive_limit_error("entries")
+            sizes = {m.name: m.size for m in members if m.isreg()}
+            total = 0
+            for m in members:
+                # A hard link is written out as a full copy, so it counts like one.
+                total += m.size if m.isreg() else (sizes.get(m.linkname, 0) if m.islnk() else 0)
+                if total > ARCHIVE_MAX_BYTES:
+                    raise self._archive_limit_error("bytes")
+            # 'data' filter: refuses absolute paths, '..', links leaving root and device files.
+            t.extractall(root, members=members, filter="data")
+
+    @staticmethod
+    def _find_rar_tool() -> Optional[str]:
+        for tool in ("unrar", "7z", "bsdtar"):
+            if shutil.which(tool):
+                return tool
+        return None
+
+    def _list_rar(self, tool: str, arch: Path) -> Tuple[int, int]:
+        """Returns (entry_count, expanded_bytes) from the tool's listing."""
+        if tool == "unrar":
+            cmd = ["unrar", "lt", "-p-", "--", str(arch)]
+        elif tool == "7z":
+            cmd = ["7z", "l", "-slt", "-p", "--", str(arch)]
+        else:
+            cmd = ["bsdtar", "-tvf", str(arch)]
+        res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, errors="replace")
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout).strip().splitlines()
+            raise RuntimeError(f"RAR arşivi okunamadı ({tool}): {err[-1] if err else res.returncode}")
+        entries = 0
+        total = 0
+        if tool == "unrar":
+            for line in res.stdout.splitlines():
+                s = line.strip()
+                if s.startswith("Name: "):
+                    entries += 1
+                elif s.startswith("Size: "):
+                    total += int(s[6:].strip() or 0)
+        elif tool == "7z":
+            body = res.stdout.split("\n----------\n", 1)[-1]
+            for line in body.splitlines():
+                if line.startswith("Path = "):
+                    entries += 1
+                elif line.startswith("Size = "):
+                    total += int(line[7:].strip() or 0)
+        else:
+            for line in res.stdout.splitlines():
+                cols = line.split(None, 8)
+                if len(cols) >= 9:
+                    entries += 1
+                    if cols[4].isdigit():
+                        total += int(cols[4])
+        return entries, total
+
+    def _extract_rar(self, arch: Path, root: Path) -> None:
+        tool = self._find_rar_tool()
+        if not tool:
+            raise RuntimeError(
+                "RAR arşivlerini açmak için 'unrar', '7z' (7-Zip) veya 'bsdtar' (libarchive) gereklidir. "
+                "Lütfen bunlardan birini sistem paket yöneticisiyle kurun."
+            )
+        entries, total = self._list_rar(tool, arch)
+        if entries > ARCHIVE_MAX_ENTRIES:
+            raise self._archive_limit_error("entries")
+        if total > ARCHIVE_MAX_BYTES:
+            raise self._archive_limit_error("bytes")
+
+        staging = Path(tempfile.mkdtemp(prefix=".nashi-rar-", dir=str(root)))
+        try:
+            if tool == "unrar":
+                cmd = ["unrar", "x", "-o+", "-p-", "-y", "--", str(arch), str(staging) + os.sep]
+            elif tool == "7z":
+                cmd = ["7z", "x", "-y", "-p", "-bso0", "-bsp0", f"-o{staging}", "--", str(arch)]
+            else:
+                cmd = ["bsdtar", "-xf", str(arch), "-C", str(staging)]
+            res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, errors="replace")
+            if res.returncode != 0:
+                err = (res.stderr or res.stdout).strip().splitlines()
+                raise RuntimeError(f"RAR arşivi çıkarılamadı ({tool}): {err[-1] if err else res.returncode}")
+
+            # Validate what the tool actually wrote before it reaches the destination.
+            count = 0
+            expanded = 0
+            base = str(staging)
+            for dirpath, dirnames, filenames in os.walk(staging):
+                for name in dirnames + filenames:
+                    count += 1
+                    p = os.path.join(dirpath, name)
+                    st = os.lstat(p)
+                    if stat.S_ISLNK(st.st_mode):
+                        real = os.path.realpath(p)
+                        if not (real == base or real.startswith(base + os.sep)):
+                            raise ValueError("Arşivdeki bağ çıkarma klasörünün dışını gösteriyor.")
+                    elif stat.S_ISREG(st.st_mode):
+                        expanded += st.st_size
+                    elif not stat.S_ISDIR(st.st_mode):
+                        raise ValueError(f"Arşivde desteklenmeyen özel dosya var: {name}")
+            if count > ARCHIVE_MAX_ENTRIES:
+                raise self._archive_limit_error("entries")
+            if expanded > ARCHIVE_MAX_BYTES:
+                raise self._archive_limit_error("bytes")
+            self._merge_tree(staging, root)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    @classmethod
+    def _merge_tree(cls, src: Path, dst: Path) -> None:
+        """Moves src's children into dst (same filesystem, no copy)."""
+        for entry in os.scandir(src):
+            s = Path(entry.path)
+            d = dst / entry.name
+            if d.is_symlink():
+                d.unlink()
+            if entry.is_dir(follow_symlinks=False) and d.is_dir():
+                cls._merge_tree(s, d)
+                shutil.copystat(s, d, follow_symlinks=False)
+            elif d.is_dir():
+                raise ValueError(f"Hedefte aynı adlı bir klasör var: {d}")
+            else:
+                os.replace(s, d)
 
     def convert_archive(self, archive_path: str, target_format: str, output_path: str) -> str:
         """Converts between ZIP, TAR, and GZ archive formats."""
