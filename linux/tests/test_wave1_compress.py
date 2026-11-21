@@ -1,4 +1,9 @@
 """Wave 1 / madde 3: sıkıştırma çıktısı küçük değilse orijinal korunur."""
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))  # standalone runs
+
 import hashlib
 import os
 import subprocess

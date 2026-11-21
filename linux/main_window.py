@@ -923,11 +923,11 @@ class NashiMainWindow(QMainWindow):
                 widget.blockSignals(False)
 
     def bring_to_front(self):
-        # showNormal() would un-maximize a maximized window; only restore when minimized.
+        # showNormal() would un-maximize a maximized window: clear only the minimized
+        # flag, so a maximized-then-minimized window comes back maximized.
         if self.isMinimized():
-            self.showNormal()
-        else:
-            self.show()
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
         self.raise_()
         self.activateWindow()
 

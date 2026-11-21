@@ -1,4 +1,9 @@
 """Wave 1 / madde 6: Kütüphane araması Türkçe İ/ı/I/i ve aksan duyarsız."""
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))  # standalone runs
+
 import unicodedata
 
 from wave1_common import TempDirTestCase

@@ -1,4 +1,9 @@
 """Wave 1 / madde 2: QR okuma saydam arka planı beyaza düzleştirir."""
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))  # standalone runs
+
 import subprocess
 
 from wave1_common import TempDirTestCase, need
@@ -33,6 +38,14 @@ class ReadQrTransparencyTests(TempDirTestCase):
     def test_plain_png_still_works(self):
         img = self._make("p.png", [])
         self.assertEqual(engine.NashiEngine().read_qr(str(img)), "nashi-dalga-1")
+
+    def test_qr_on_second_pdf_page(self):
+        qr = self._make("q.png", [])
+        blank = self.tmp / "bos.png"
+        subprocess.run(["magick", "-size", "300x300", "xc:white", str(blank)], check=True, timeout=30)
+        pdf = self.tmp / "iki.pdf"
+        subprocess.run(["magick", str(blank), str(qr), str(pdf)], check=True, timeout=60)
+        self.assertEqual(engine.NashiEngine().read_qr(str(pdf)), "nashi-dalga-1")
 
     def test_no_code_raises(self):
         img = self.tmp / "empty.png"

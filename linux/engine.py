@@ -770,14 +770,14 @@ class NashiEngine:
 
         Never invents a value (the old fallback was a fake 10 s, which capped the
         trim range and split files wrongly). NaN/inf/0/'N/A' mean unknown; the
-        container duration is preferred, then the first stream duration."""
+        container (format) duration is preferred, then the longest stream."""
         if not shutil.which("ffprobe"):
             return None
         try:
             res = subprocess.run([
                 "ffprobe", "-v", "error",
                 "-show_entries", "format=duration:stream=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-of", "json",
                 media_path
             ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=15)
@@ -785,14 +785,25 @@ class NashiEngine:
             return None
         if res.returncode != 0:
             return None
-        for line in (res.stdout or "").splitlines():
+        try:
+            info = json.loads(res.stdout or "{}")
+        except ValueError:
+            return None
+
+        def valid(raw: Any) -> Optional[float]:
             try:
-                value = float(line.strip())
-            except ValueError:
-                continue
-            if math.isfinite(value) and value > 0:
-                return value
-        return None
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) and value > 0 else None
+
+        # The container duration covers every stream (e.g. audio longer than video).
+        fmt = valid((info.get("format") or {}).get("duration"))
+        if fmt is not None:
+            return fmt
+        streams = [valid(st.get("duration")) for st in (info.get("streams") or []) if isinstance(st, dict)]
+        streams = [v for v in streams if v is not None]
+        return max(streams) if streams else None
 
     def _require_media_duration(self, media_path: str) -> float:
         duration = self.get_media_duration(media_path)
@@ -1132,12 +1143,19 @@ class NashiEngine:
             except RuntimeError:
                 scan_path = image_path  # unreadable for magick: let zbarimg try the original
 
+        def scan(path: str) -> subprocess.CompletedProcess:
+            return subprocess.run(["zbarimg", "--quiet", "--raw", path],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
         try:
-            cmd = ["zbarimg", "--quiet", "--raw", scan_path]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            result = scan(scan_path)
         finally:
             if flat_tmp and os.path.exists(flat_tmp):
                 os.remove(flat_tmp)
+        if scan_path != image_path and (result.returncode != 0 or not result.stdout.strip()):
+            # The flattened copy holds only the first page/frame (e.g. a QR on PDF
+            # page 2): give zbarimg the original once more before giving up.
+            result = scan(image_path)
         if result.returncode == 0:
             decoded = result.stdout.strip()
             if decoded:
@@ -1508,10 +1526,12 @@ class NashiEngine:
                 target = self._safe_member_path(info.filename, root)
                 if target is None:
                     continue
-                self._check_archive_destination(root, target)
+                is_link_entry = info.create_system == 3 and stat.S_ISLNK(info.external_attr >> 16)
+                self._check_archive_destination(root, target.parent if is_link_entry else target)
                 unix_mode = (info.external_attr >> 16) if info.create_system == 3 else 0
                 kind = stat.S_IFMT(unix_mode)
-                perm = stat.S_IMODE(unix_mode) & 0o777
+                # None = no Unix mode stored (e.g. Windows ZIP): keep the umask default.
+                perm: Optional[int] = (stat.S_IMODE(unix_mode) & 0o777) if unix_mode else None
                 try:
                     mtime = time.mktime(info.date_time + (0, 0, -1))  # DOS time is local time
                 except (OverflowError, ValueError):
@@ -1525,6 +1545,9 @@ class NashiEngine:
                     link_to = z.read(info).decode("utf-8", errors="strict")
                     if not self._link_target_inside(root, target, link_to):
                         raise ValueError(f"Arşivdeki bağ çıkarma klasörünün dışını gösteriyor: {info.filename}")
+                    if target in seen:
+                        raise ValueError(f"Arşivde aynı yol iki kez var: {info.filename}")
+                    seen.add(target)
                     links.append((target, link_to))
                     continue
                 if kind not in (0, stat.S_IFREG):
@@ -1536,14 +1559,19 @@ class NashiEngine:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with z.open(info, "r") as src, open(target, "wb") as dst:
                     expanded = self._copy_limited(src, dst, expanded)
-                if perm:
+                if perm is not None:
                     os.chmod(target, perm)
                 if mtime > 0:
                     os.utime(target, (mtime, mtime))
 
             for link_path, link_to in links:
-                self._check_archive_destination(root, link_path)
+                if link_path.parent != root:
+                    self._check_archive_destination(root, link_path.parent)
                 link_path.parent.mkdir(parents=True, exist_ok=True)
+                if os.path.lexists(link_path):
+                    if link_path.is_dir() and not link_path.is_symlink():
+                        raise ValueError(f"Hedefte bağ ile aynı adlı bir klasör var: {link_path.relative_to(root)}")
+                    link_path.unlink()  # re-extracting: replace the old file/link, like files are
                 os.symlink(link_to, link_path)
             for link_path, _ in links:
                 real = os.path.realpath(link_path)
@@ -1554,7 +1582,7 @@ class NashiEngine:
             # Folders last: writing their children changes their mtime. The owner
             # keeps full access so later entries, conversion and cleanup still work.
             for d, perm, mtime in sorted(dirs, key=lambda x: len(x[0].parts), reverse=True):
-                if perm:
+                if perm is not None:
                     os.chmod(d, perm | 0o700)
                 if mtime > 0:
                     os.utime(d, (mtime, mtime))
@@ -1575,14 +1603,11 @@ class NashiEngine:
             t.extractall(root, members=members, filter="data")
 
     @staticmethod
-    def _find_rar_tool() -> Optional[str]:
-        for tool in ("unrar", "7z", "bsdtar"):
-            if shutil.which(tool):
-                return tool
-        return None
+    def _find_rar_tools() -> List[str]:
+        return [tool for tool in ("unrar", "7z", "bsdtar") if shutil.which(tool)]
 
-    def _list_rar(self, tool: str, arch: Path) -> Tuple[int, int]:
-        """Returns (entry_count, expanded_bytes) from the tool's listing."""
+    def _list_rar(self, tool: str, arch: Path) -> Tuple[int, int, List[str]]:
+        """Returns (entry_count, expanded_bytes, member_names) from the tool's listing."""
         if tool == "unrar":
             cmd = ["unrar", "lt", "-p-", "--", str(arch)]
         elif tool == "7z":
@@ -1594,82 +1619,119 @@ class NashiEngine:
         if res.returncode != 0:
             err = (res.stderr or res.stdout).strip().splitlines()
             raise RuntimeError(f"RAR arşivi okunamadı ({tool}): {err[-1] if err else res.returncode}")
-        entries = 0
+        names: List[str] = []
         total = 0
         if tool == "unrar":
             for line in res.stdout.splitlines():
                 s = line.strip()
                 if s.startswith("Name: "):
-                    entries += 1
+                    names.append(s[6:])
                 elif s.startswith("Size: "):
                     total += int(s[6:].strip() or 0)
         elif tool == "7z":
             body = res.stdout.split("\n----------\n", 1)[-1]
             for line in body.splitlines():
                 if line.startswith("Path = "):
-                    entries += 1
+                    names.append(line[7:])
                 elif line.startswith("Size = "):
                     total += int(line[7:].strip() or 0)
         else:
             for line in res.stdout.splitlines():
                 cols = line.split(None, 8)
                 if len(cols) >= 9:
-                    entries += 1
+                    name = cols[8]
+                    for sep in (" -> ", " link to "):  # symlink / hard link display
+                        if sep in name:
+                            name = name.split(sep, 1)[0]
+                    names.append(name)
                     if cols[4].isdigit():
                         total += int(cols[4])
-        return entries, total
+        return len(names), total, names
+
+    @staticmethod
+    def _open_up_dirs(tree: Path) -> None:
+        """Gives the owner rwx on every folder below tree (read-only archive folders
+        would otherwise block moving their children out and removing the staging)."""
+        for dirpath, dirnames, _ in os.walk(tree):
+            for d in dirnames:
+                p = os.path.join(dirpath, d)
+                try:
+                    st = os.lstat(p)
+                    if stat.S_ISDIR(st.st_mode):
+                        os.chmod(p, stat.S_IMODE(st.st_mode) | 0o700)
+                except OSError:
+                    pass
+
+    @classmethod
+    def _remove_staging(cls, staging: Path) -> None:
+        if staging.exists():
+            cls._open_up_dirs(staging)
+            shutil.rmtree(staging, ignore_errors=True)
+
+    @staticmethod
+    def _rar_extract_cmd(tool: str, arch: Path, staging: Path) -> List[str]:
+        if tool == "unrar":
+            return ["unrar", "x", "-o+", "-p-", "-y", "--", str(arch), str(staging) + os.sep]
+        if tool == "7z":
+            return ["7z", "x", "-y", "-p", "-bso0", "-bsp0", f"-o{staging}", "--", str(arch)]
+        return ["bsdtar", "-xf", str(arch), "-C", str(staging)]
 
     def _extract_rar(self, arch: Path, root: Path) -> None:
-        tool = self._find_rar_tool()
-        if not tool:
+        tools = self._find_rar_tools()
+        if not tools:
             raise RuntimeError(
                 "RAR arşivlerini açmak için 'unrar', '7z' (7-Zip) veya 'bsdtar' (libarchive) gereklidir. "
                 "Lütfen bunlardan birini sistem paket yöneticisiyle kurun."
             )
-        entries, total = self._list_rar(tool, arch)
+        entries, total, names = self._list_rar(tools[0], arch)
         if entries > ARCHIVE_MAX_ENTRIES:
             raise self._archive_limit_error("entries")
         if total > ARCHIVE_MAX_BYTES:
             raise self._archive_limit_error("bytes")
+        for name in names:  # refuse absolute and '..' names before anything is written
+            self._safe_member_path(name, root)
 
-        staging = Path(tempfile.mkdtemp(prefix=".nashi-rar-", dir=str(root)))
-        try:
-            if tool == "unrar":
-                cmd = ["unrar", "x", "-o+", "-p-", "-y", "--", str(arch), str(staging) + os.sep]
-            elif tool == "7z":
-                cmd = ["7z", "x", "-y", "-p", "-bso0", "-bsp0", f"-o{staging}", "--", str(arch)]
-            else:
-                cmd = ["bsdtar", "-xf", str(arch), "-C", str(staging)]
-            res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, text=True, errors="replace")
-            if res.returncode != 0:
-                err = (res.stderr or res.stdout).strip().splitlines()
-                raise RuntimeError(f"RAR arşivi çıkarılamadı ({tool}): {err[-1] if err else res.returncode}")
+        last_error: Optional[RuntimeError] = None
+        for tool in tools:
+            staging = Path(tempfile.mkdtemp(prefix=".nashi-rar-", dir=str(root)))
+            try:
+                res = subprocess.run(self._rar_extract_cmd(tool, arch, staging), stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+                if res.returncode != 0:
+                    # e.g. unrar cannot fill a folder it already made read-only: try the next tool.
+                    err = (res.stderr or res.stdout).strip().splitlines()
+                    last_error = RuntimeError(f"RAR arşivi çıkarılamadı ({tool}): {err[-1] if err else res.returncode}")
+                    continue
+                self._validate_rar_staging(staging)
+                self._open_up_dirs(staging)
+                self._merge_tree(staging, root)
+                return
+            finally:
+                self._remove_staging(staging)
+        raise last_error or RuntimeError("RAR arşivi çıkarılamadı.")
 
-            # Validate what the tool actually wrote before it reaches the destination.
-            count = 0
-            expanded = 0
-            base = str(staging)
-            for dirpath, dirnames, filenames in os.walk(staging):
-                for name in dirnames + filenames:
-                    count += 1
-                    p = os.path.join(dirpath, name)
-                    st = os.lstat(p)
-                    if stat.S_ISLNK(st.st_mode):
-                        real = os.path.realpath(p)
-                        if not (real == base or real.startswith(base + os.sep)):
-                            raise ValueError("Arşivdeki bağ çıkarma klasörünün dışını gösteriyor.")
-                    elif stat.S_ISREG(st.st_mode):
-                        expanded += st.st_size
-                    elif not stat.S_ISDIR(st.st_mode):
-                        raise ValueError(f"Arşivde desteklenmeyen özel dosya var: {name}")
-            if count > ARCHIVE_MAX_ENTRIES:
-                raise self._archive_limit_error("entries")
-            if expanded > ARCHIVE_MAX_BYTES:
-                raise self._archive_limit_error("bytes")
-            self._merge_tree(staging, root)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+    def _validate_rar_staging(self, staging: Path) -> None:
+        """Validates what the tool actually wrote before it reaches the destination."""
+        count = 0
+        expanded = 0
+        base = str(staging)
+        for dirpath, dirnames, filenames in os.walk(staging):
+            for name in dirnames + filenames:
+                count += 1
+                p = os.path.join(dirpath, name)
+                st = os.lstat(p)
+                if stat.S_ISLNK(st.st_mode):
+                    real = os.path.realpath(p)
+                    if not (real == base or real.startswith(base + os.sep)):
+                        raise ValueError("Arşivdeki bağ çıkarma klasörünün dışını gösteriyor.")
+                elif stat.S_ISREG(st.st_mode):
+                    expanded += st.st_size
+                elif not stat.S_ISDIR(st.st_mode):
+                    raise ValueError(f"Arşivde desteklenmeyen özel dosya var: {name}")
+        if count > ARCHIVE_MAX_ENTRIES:
+            raise self._archive_limit_error("entries")
+        if expanded > ARCHIVE_MAX_BYTES:
+            raise self._archive_limit_error("bytes")
 
     @classmethod
     def _merge_tree(cls, src: Path, dst: Path) -> None:
@@ -1680,8 +1742,9 @@ class NashiEngine:
             if d.is_symlink():
                 d.unlink()
             if entry.is_dir(follow_symlinks=False) and d.is_dir():
+                # The folder already exists in the destination: merge into it and
+                # leave its own permissions and dates alone.
                 cls._merge_tree(s, d)
-                shutil.copystat(s, d, follow_symlinks=False)
             elif d.is_dir():
                 raise ValueError(f"Hedefte aynı adlı bir klasör var: {d}")
             else:

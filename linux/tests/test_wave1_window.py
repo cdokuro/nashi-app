@@ -1,7 +1,12 @@
 """Wave 1 / madde 7: bring_to_front büyütülmüş pencereyi bozmaz; tepside sürükleme kısayolu anahtarı."""
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))  # standalone runs
+
 from wave1_common import TempDirTestCase
 
-from PySide6.QtCore import QObject  # noqa: E402
+from PySide6.QtCore import QObject, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QCheckBox  # noqa: E402
 
 import ipc_and_drag  # noqa: E402
@@ -12,12 +17,23 @@ Win = main_window.NashiMainWindow
 
 
 class _FakeWindow:
-    def __init__(self, minimized):
-        self.minimized = minimized
+    def __init__(self, minimized, maximized=False):
+        self.state = Qt.WindowState.WindowNoState
+        if minimized:
+            self.state |= Qt.WindowState.WindowMinimized
+        if maximized:
+            self.state |= Qt.WindowState.WindowMaximized
         self.calls = []
 
     def isMinimized(self):
-        return self.minimized
+        return bool(self.state & Qt.WindowState.WindowMinimized)
+
+    def windowState(self):
+        return self.state
+
+    def setWindowState(self, state):
+        self.calls.append("setWindowState")
+        self.state = state
 
     def __getattr__(self, name):
         if name in ("showNormal", "show", "raise_", "activateWindow", "showMaximized"):
@@ -29,8 +45,16 @@ class BringToFrontTests(TempDirTestCase):
     def test_minimized_window_is_restored(self):
         w = _FakeWindow(minimized=True)
         Win.bring_to_front(w)
-        self.assertEqual(w.calls[0], "showNormal")
+        self.assertFalse(w.isMinimized())
+        self.assertNotIn("showNormal", w.calls)
         self.assertIn("activateWindow", w.calls)
+
+    def test_minimized_maximized_window_comes_back_maximized(self):
+        w = _FakeWindow(minimized=True, maximized=True)
+        Win.bring_to_front(w)
+        self.assertFalse(w.isMinimized())
+        self.assertTrue(w.state & Qt.WindowState.WindowMaximized)
+        self.assertNotIn("showNormal", w.calls)
 
     def test_not_minimized_keeps_state(self):
         w = _FakeWindow(minimized=False)

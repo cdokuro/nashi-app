@@ -1,4 +1,9 @@
 """Wave 1 / madde 5: süre okunamazsa sahte 10 sn yerine None; çağıranlar başa çıkar."""
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))  # standalone runs
+
 import subprocess
 from unittest import mock
 
@@ -22,14 +27,16 @@ class DurationUnknownTests(TempDirTestCase):
         self.assertIsNone(self.eng.get_media_duration(str(bad)))
 
     def test_nan_and_na_are_unknown(self):
-        for raw in ("N/A\n", "nan\n", "inf\n", "0\n", "\n"):
-            fake = subprocess.CompletedProcess([], 0, stdout=raw, stderr="")
+        for raw in ("N/A", "nan", "inf", "0", ""):
+            js = '{"streams": [{"duration": "%s"}], "format": {"duration": "%s"}}' % (raw, raw)
+            fake = subprocess.CompletedProcess([], 0, stdout=js, stderr="")
             with mock.patch("engine.subprocess.run", return_value=fake), \
                  mock.patch("engine.shutil.which", return_value="/usr/bin/ffprobe"):
                 self.assertIsNone(self.eng.get_media_duration("x.mp4"), raw)
 
     def test_stream_duration_fallback(self):
-        fake = subprocess.CompletedProcess([], 0, stdout="N/A\n3.5\n", stderr="")
+        out = '{"streams": [{"duration": "2.0"}, {"duration": "3.5"}, {"duration": "N/A"}], "format": {}}'
+        fake = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
         with mock.patch("engine.subprocess.run", return_value=fake), \
              mock.patch("engine.shutil.which", return_value="/usr/bin/ffprobe"):
             self.assertAlmostEqual(self.eng.get_media_duration("x.mp4"), 3.5)
@@ -40,6 +47,20 @@ class DurationUnknownTests(TempDirTestCase):
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=2",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(v)], check=True, timeout=60)
         self.assertAlmostEqual(self.eng.get_media_duration(str(v)), 2.0, delta=0.2)
+
+    @need("ffmpeg", "ffprobe")
+    def test_container_duration_wins_over_shorter_stream(self):
+        v = self.tmp / "av.mp4"  # 2 s video, 5 s audio: the file lasts 5 s
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=2",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(v)], check=True, timeout=60)
+        self.assertAlmostEqual(self.eng.get_media_duration(str(v)), 5.0, delta=0.2)
+
+    def test_garbage_output_is_unknown(self):
+        fake = subprocess.CompletedProcess([], 0, stdout="not json", stderr="")
+        with mock.patch("engine.subprocess.run", return_value=fake), \
+             mock.patch("engine.shutil.which", return_value="/usr/bin/ffprobe"):
+            self.assertIsNone(self.eng.get_media_duration("x.mp4"))
 
     def test_split_and_snapshots_refuse_unknown_duration(self):
         v = self.tmp / "v.mp4"

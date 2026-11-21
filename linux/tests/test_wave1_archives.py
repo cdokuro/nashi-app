@@ -1,4 +1,9 @@
 """Wave 1 / madde 4: RAR (unrar/7z/bsdtar), ZIP tarih+izin, güvenlik sınırları."""
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))  # standalone runs
+
 import os
 import stat
 import struct
@@ -14,7 +19,8 @@ import engine  # noqa: E402
 
 
 def make_rar4(path, files):
-    """Writes a stored (uncompressed) RAR 4.x archive. files: [(name, bytes)]."""
+    """Writes a stored (uncompressed) RAR 4.x archive.
+    files: [(name, bytes)] or [(name, bytes, unix_mode)]; a S_IFDIR mode makes a folder entry."""
     def block(head_type, flags, body):
         size = 7 + len(body)
         crc_part = struct.pack("<BHH", head_type, flags, size) + body
@@ -23,13 +29,27 @@ def make_rar4(path, files):
     out = b"Rar!\x1a\x07\x00"
     out += block(0x73, 0, struct.pack("<HI", 0, 0))
     dos_time = (2024 - 1980) << 25 | 5 << 21 | 17 << 16 | 12 << 11 | 30 << 5 | 0
-    for name, data in files:
+    for entry in files:
+        name, data = entry[0], entry[1]
+        mode = entry[2] if len(entry) > 2 else 0o100644
+        is_dir = stat.S_ISDIR(mode)
         nb = name.encode("utf-8")
         body = struct.pack("<IIBIIBBHI", len(data), len(data), 3, zlib.crc32(data), dos_time,
-                           20, 0x30, len(nb), 0o100644) + nb
-        out += block(0x74, 0x8000, body) + data
+                           20, 0x30, len(nb), mode) + nb
+        out += block(0x74, 0x8000 | (0xE0 if is_dir else 0), body) + data
     out += block(0x7B, 0x4000, b"")
     path.write_bytes(out)
+
+
+def _only_tool(tool):
+    """Patch which() so that only `tool` (of the three RAR tools) is installed."""
+    real_which = engine.shutil.which
+    others = {"unrar", "7z", "bsdtar"} - {tool}
+    return mock.patch("engine.shutil.which", side_effect=lambda n: None if n in others else real_which(n))
+
+
+def _leftovers(dest):
+    return [p.name for p in dest.iterdir() if p.name.startswith(".nashi")] if dest.exists() else []
 
 
 class ZipFidelityTests(TempDirTestCase):
@@ -60,6 +80,49 @@ class ZipFidelityTests(TempDirTestCase):
         self.assertEqual(stat.S_IMODE((dest / "gizli.txt").stat().st_mode), 0o600)
         self.assertEqual(time.localtime(run.stat().st_mtime)[:6], (2020, 1, 2, 3, 4, 6))
         self.assertEqual(time.localtime((dest / "bin").stat().st_mtime)[:6], (2021, 3, 4, 5, 6, 8))
+
+    def test_read_only_folder_and_zero_mode_file(self):
+        arch = self._zip([
+            ("kilitli/", b"", stat.S_IFDIR | 0o555, (2021, 3, 4, 5, 6, 8)),
+            ("kilitli/a.txt", b"a", stat.S_IFREG | 0o444, (2021, 3, 4, 5, 6, 8)),
+            ("sifir.txt", b"z", stat.S_IFREG | 0o000, (2021, 3, 4, 5, 6, 8)),
+        ])
+        dest = self.tmp / "out"
+        try:
+            self.eng.extract_archive(str(arch), str(dest))
+            self.assertEqual((dest / "kilitli" / "a.txt").read_bytes(), b"a")
+            self.assertEqual(stat.S_IMODE((dest / "kilitli").stat().st_mode), 0o755)  # 0o555 stored, owner keeps rwx
+            self.assertEqual(stat.S_IMODE((dest / "sifir.txt").stat().st_mode), 0)  # stored 000 is restored
+        finally:
+            for p in (dest / "sifir.txt", dest / "kilitli"):
+                if p.exists():
+                    os.chmod(p, 0o700)
+
+    def test_duplicate_symlink_entries_give_clear_error(self):
+        arch = self.tmp / "iki-link.zip"
+        with zipfile.ZipFile(arch, "w") as z:
+            for _ in range(2):
+                info = zipfile.ZipInfo("link")
+                info.create_system = 3
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                z.writestr(info, "hedef.txt")
+            z.writestr("hedef.txt", b"x")
+        with self.assertRaises(ValueError) as cm:
+            self.eng.extract_archive(str(arch), str(self.tmp / "out"))
+        self.assertIn("iki kez", str(cm.exception))
+
+    def test_reextract_over_existing_symlink(self):
+        arch = self.tmp / "link-ok.zip"
+        with zipfile.ZipFile(arch, "w") as z:
+            z.writestr("hedef.txt", b"x")
+            info = zipfile.ZipInfo("link")
+            info.create_system = 3
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            z.writestr(info, "hedef.txt")
+        dest = self.tmp / "out"
+        self.eng.extract_archive(str(arch), str(dest))
+        self.eng.extract_archive(str(arch), str(dest))  # same folder again
+        self.assertEqual(os.readlink(dest / "link"), "hedef.txt")
 
     def test_windows_zip_without_modes_uses_defaults(self):
         arch = self.tmp / "win.zip"
@@ -165,9 +228,7 @@ class RarTests(TempDirTestCase):
         make_rar4(self.arch, [("merhaba.txt", b"Merhaba RAR\n"), ("alt/ikinci.txt", b"2\n")])
 
     def _check(self, tool):
-        real_which = engine.shutil.which
-        others = {"unrar", "7z", "bsdtar"} - {tool}
-        with mock.patch("engine.shutil.which", side_effect=lambda n: None if n in others else real_which(n)):
+        with _only_tool(tool):
             dest = self.tmp / f"out-{tool}"
             self.eng.extract_archive(str(self.arch), str(dest))
         self.assertEqual((dest / "merhaba.txt").read_bytes(), b"Merhaba RAR\n")
@@ -193,6 +254,75 @@ class RarTests(TempDirTestCase):
         msg = str(cm.exception)
         self.assertIn("unrar", msg)
         self.assertIn("7z", msg)
+
+    def _ro_rar(self):
+        arch = self.tmp / "kilitli.rar"
+        make_rar4(arch, [("kilitli", b"", stat.S_IFDIR | 0o555), ("kilitli/a.txt", b"a\n")])
+        return arch
+
+    def _cleanup_modes(self, dest):
+        for dirpath, dirnames, _ in os.walk(dest):
+            for d in dirnames:
+                os.chmod(os.path.join(dirpath, d), 0o700)
+
+    @need("unrar", "7z", "bsdtar")
+    def test_read_only_folder_any_tool(self):
+        arch = self._ro_rar()
+        dest = self.tmp / "out"
+        dest.mkdir()
+        try:
+            self.eng.extract_archive(str(arch), str(dest))
+            self.assertEqual((dest / "kilitli" / "a.txt").read_bytes(), b"a\n")
+            self.assertEqual(_leftovers(dest), [])
+        finally:
+            self._cleanup_modes(dest)
+
+    def test_read_only_folder_each_tool_leaves_no_staging(self):
+        for tool in ("unrar", "7z", "bsdtar"):
+            if not engine.shutil.which(tool):
+                continue
+            dest = self.tmp / f"ro-{tool}"
+            dest.mkdir()
+            (dest / "kilitli").mkdir()  # existing folder in the destination: merged into
+            try:
+                with _only_tool(tool):
+                    try:
+                        self.eng.extract_archive(str(self._ro_rar()), str(dest))
+                        self.assertEqual((dest / "kilitli" / "a.txt").read_bytes(), b"a\n", tool)
+                    except RuntimeError:
+                        pass  # a tool may refuse; it must still clean up after itself
+                self.assertEqual(_leftovers(dest), [], tool)
+            finally:
+                self._cleanup_modes(dest)
+
+    def test_existing_destination_folder_keeps_its_attributes(self):
+        for tool in ("unrar", "7z", "bsdtar"):
+            if not engine.shutil.which(tool):
+                continue
+            dest = self.tmp / f"keep-{tool}"
+            (dest / "alt").mkdir(parents=True)
+            os.chmod(dest / "alt", 0o750)
+            os.utime(dest / "alt", (1_000_000_000, 1_000_000_000))
+            with _only_tool(tool):
+                self.eng.extract_archive(str(self.arch), str(dest))
+            st = (dest / "alt").stat()
+            self.assertEqual(stat.S_IMODE(st.st_mode), 0o750, tool)
+            self.assertTrue((dest / "alt" / "ikinci.txt").exists(), tool)
+
+    def test_traversal_names_rejected_before_extracting(self):
+        evil = self.tmp / "kotu.rar"
+        make_rar4(evil, [("../kacis.txt", b"x"), ("ok.txt", b"y")])
+        for tool in ("unrar", "7z", "bsdtar"):
+            if not engine.shutil.which(tool):
+                continue
+            dest = self.tmp / f"ev-{tool}"
+            with _only_tool(tool), mock.patch.object(engine.subprocess, "run", wraps=engine.subprocess.run) as run:
+                with self.assertRaises(ValueError, msg=tool):
+                    self.eng.extract_archive(str(evil), str(dest))
+            self.assertEqual(len(run.call_args_list), 1, f"{tool}: only the listing may run")
+            self.assertFalse((dest / "kacis.txt").exists())
+            self.assertFalse((dest / "ok.txt").exists())
+            self.assertFalse((self.tmp / "kacis.txt").exists())
 
     @need("unrar")
     def test_rar_entry_limit(self):

@@ -1,4 +1,9 @@
 """Wave 1 / madde 8: CSV/TSV/altyazı girdilerinde metin kodlaması algılama."""
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))  # standalone runs
+
 import csv
 
 from wave1_common import TempDirTestCase
@@ -58,7 +63,8 @@ class TabularAndSubtitleTests(TempDirTestCase):
         src = self.tmp / "film.srt"
         src.write_bytes("1\r\n00:00:01,000 --> 00:00:02,500\r\nGüneş ışığı\r\n".encode("cp1254"))
         out = self.eng.convert(str(src), "vtt")
-        body = open(out, encoding="utf-8").read()
+        with open(out, encoding="utf-8") as f:
+            body = f.read()
         self.assertIn("Güneş ışığı", body)
         self.assertIn("00:00:01.000 --> 00:00:02.500", body)
 
@@ -66,6 +72,7 @@ class TabularAndSubtitleTests(TempDirTestCase):
         src = self.tmp / "film.vtt"
         src.write_bytes(b"\xff\xfe" + "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nİyi akşamlar\n".encode("utf-16-le"))
         out = self.eng.convert(str(src), "srt")
-        body = open(out, encoding="utf-8").read()
+        with open(out, encoding="utf-8") as f:
+            body = f.read()
         self.assertIn("İyi akşamlar", body)
         self.assertIn("00:00:01,000 --> 00:00:02,000", body)
