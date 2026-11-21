@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import tempfile
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 MAX_HISTORY_ENTRIES = 50
+
+
+def search_fold(text: str) -> str:
+    """Folds text for Library search: case-, accent- and Turkish-I-insensitive.
+
+    Upstream parity (AppLocalization.matches): "i" finds "İstanbul", "ı" finds
+    "Işık", "cafe" finds "café", and decomposed names (İ = I + U+0307, as file
+    managers hand them over) match composed queries. Dotted/dotless I/i all fold
+    to "i" so both Turkish and English spellings meet."""
+    decomposed = unicodedata.normalize("NFD", str(text))
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return stripped.replace("ı", "i").casefold()
 
 
 def get_default_data_dir() -> Path:
@@ -178,15 +191,15 @@ class NashiStore:
             item["exists"] = bool(out_p and os.path.exists(out_p))
         if not query or not query.strip():
             return items
-        q = query.strip().lower()
+        q = search_fold(query.strip())
         filtered = []
         for item in items:
-            haystack = " ".join([
+            haystack = search_fold(" ".join([
                 str(item.get("source_name", "")),
                 str(os.path.basename(item.get("output_path", ""))),
                 str(item.get("format", "")),
                 str(item.get("action_title", "")),
-            ]).lower()
+            ]))
             if q in haystack:
                 filtered.append(item)
         return filtered
