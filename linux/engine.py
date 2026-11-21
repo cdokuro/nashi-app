@@ -1559,7 +1559,7 @@ class NashiEngine:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with z.open(info, "r") as src, open(target, "wb") as dst:
                     expanded = self._copy_limited(src, dst, expanded)
-                if perm is not None:
+                if perm:  # a stored 000 file mode means "not set" (upstream): keep the default
                     os.chmod(target, perm)
                 if mtime > 0:
                     os.utime(target, (mtime, mtime))
@@ -1617,8 +1617,7 @@ class NashiEngine:
         res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, errors="replace")
         if res.returncode != 0:
-            err = (res.stderr or res.stdout).strip().splitlines()
-            raise RuntimeError(f"RAR arşivi okunamadı ({tool}): {err[-1] if err else res.returncode}")
+            raise RuntimeError(f"{tool}: {self._tool_error_line(res)}")
         names: List[str] = []
         total = 0
         if tool == "unrar":
@@ -1647,6 +1646,11 @@ class NashiEngine:
                     if cols[4].isdigit():
                         total += int(cols[4])
         return len(names), total, names
+
+    @staticmethod
+    def _tool_error_line(res: subprocess.CompletedProcess) -> str:
+        err = (res.stderr or res.stdout or "").strip().splitlines()
+        return err[-1].strip() if err else f"çıkış kodu {res.returncode}"
 
     @staticmethod
     def _open_up_dirs(tree: Path) -> None:
@@ -1683,7 +1687,17 @@ class NashiEngine:
                 "RAR arşivlerini açmak için 'unrar', '7z' (7-Zip) veya 'bsdtar' (libarchive) gereklidir. "
                 "Lütfen bunlardan birini sistem paket yöneticisiyle kurun."
             )
-        entries, total, names = self._list_rar(tools[0], arch)
+        listing = None
+        list_errors: List[str] = []
+        for tool in tools:  # a tool that cannot list the archive may still be replaced by another
+            try:
+                listing = self._list_rar(tool, arch)
+                break
+            except RuntimeError as e:
+                list_errors.append(str(e))
+        if listing is None:
+            raise RuntimeError("RAR arşivi okunamadı (" + "; ".join(list_errors) + ")")
+        entries, total, names = listing
         if entries > ARCHIVE_MAX_ENTRIES:
             raise self._archive_limit_error("entries")
         if total > ARCHIVE_MAX_BYTES:
@@ -1691,7 +1705,7 @@ class NashiEngine:
         for name in names:  # refuse absolute and '..' names before anything is written
             self._safe_member_path(name, root)
 
-        last_error: Optional[RuntimeError] = None
+        errors: List[str] = []
         for tool in tools:
             staging = Path(tempfile.mkdtemp(prefix=".nashi-rar-", dir=str(root)))
             try:
@@ -1699,8 +1713,7 @@ class NashiEngine:
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
                 if res.returncode != 0:
                     # e.g. unrar cannot fill a folder it already made read-only: try the next tool.
-                    err = (res.stderr or res.stdout).strip().splitlines()
-                    last_error = RuntimeError(f"RAR arşivi çıkarılamadı ({tool}): {err[-1] if err else res.returncode}")
+                    errors.append(f"{tool}: {self._tool_error_line(res)}")
                     continue
                 self._validate_rar_staging(staging)
                 self._open_up_dirs(staging)
@@ -1708,7 +1721,7 @@ class NashiEngine:
                 return
             finally:
                 self._remove_staging(staging)
-        raise last_error or RuntimeError("RAR arşivi çıkarılamadı.")
+        raise RuntimeError("RAR arşivi çıkarılamadı (" + "; ".join(errors) + ")")
 
     def _validate_rar_staging(self, staging: Path) -> None:
         """Validates what the tool actually wrote before it reaches the destination."""

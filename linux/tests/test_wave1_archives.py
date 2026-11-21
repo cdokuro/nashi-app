@@ -92,7 +92,13 @@ class ZipFidelityTests(TempDirTestCase):
             self.eng.extract_archive(str(arch), str(dest))
             self.assertEqual((dest / "kilitli" / "a.txt").read_bytes(), b"a")
             self.assertEqual(stat.S_IMODE((dest / "kilitli").stat().st_mode), 0o755)  # 0o555 stored, owner keeps rwx
-            self.assertEqual(stat.S_IMODE((dest / "sifir.txt").stat().st_mode), 0)  # stored 000 is restored
+            # a stored 000 file mode means "not set" (upstream): the file stays readable
+            self.assertTrue(stat.S_IMODE((dest / "sifir.txt").stat().st_mode) & stat.S_IRUSR)
+            self.assertEqual((dest / "sifir.txt").read_bytes(), b"z")
+            tar_out = self.tmp / "donusum.tar"
+            self.eng.convert_archive(str(arch), "tar", str(tar_out))
+            with tarfile.open(tar_out) as t:
+                self.assertIn("sifir.txt", [m.name.lstrip("./") for m in t.getmembers()])
         finally:
             for p in (dest / "sifir.txt", dest / "kilitli"):
                 if p.exists():
@@ -323,6 +329,47 @@ class RarTests(TempDirTestCase):
             self.assertFalse((dest / "kacis.txt").exists())
             self.assertFalse((dest / "ok.txt").exists())
             self.assertFalse((self.tmp / "kacis.txt").exists())
+
+    @need("unrar", "7z", "bsdtar")
+    def test_all_tools_failing_reports_every_error(self):
+        real_run = engine.subprocess.run
+
+        def fake(cmd, *a, **kw):
+            if cmd[:2] in (["unrar", "x"], ["7z", "x"]) or cmd[:2] == ["bsdtar", "-xf"]:
+                return engine.subprocess.CompletedProcess(cmd, 2, stdout="", stderr=f"bozuk-{cmd[0]}")
+            return real_run(cmd, *a, **kw)
+
+        with mock.patch.object(engine.subprocess, "run", side_effect=fake):
+            with self.assertRaises(RuntimeError) as cm:
+                self.eng.extract_archive(str(self.arch), str(self.tmp / "out"))
+        msg = str(cm.exception)
+        for tool in ("unrar", "7z", "bsdtar"):
+            self.assertIn(f"{tool}: bozuk-{tool}", msg)
+        self.assertEqual(_leftovers(self.tmp / "out"), [])
+
+    @need("unrar", "7z")
+    def test_listing_falls_back_to_next_tool(self):
+        real_run = engine.subprocess.run
+
+        def fake(cmd, *a, **kw):
+            if cmd[:2] == ["unrar", "lt"]:
+                return engine.subprocess.CompletedProcess(cmd, 3, stdout="", stderr="liste-yok")
+            return real_run(cmd, *a, **kw)
+
+        dest = self.tmp / "out"
+        with mock.patch.object(engine.subprocess, "run", side_effect=fake):
+            self.eng.extract_archive(str(self.arch), str(dest))
+        self.assertEqual((dest / "merhaba.txt").read_bytes(), b"Merhaba RAR\n")
+
+    @need("unrar")
+    def test_listing_failure_with_every_tool_reports_all(self):
+        def fake(cmd, *a, **kw):
+            return engine.subprocess.CompletedProcess(cmd, 3, stdout="", stderr=f"liste-yok-{cmd[0]}")
+
+        with _only_tool("unrar"), mock.patch.object(engine.subprocess, "run", side_effect=fake):
+            with self.assertRaises(RuntimeError) as cm:
+                self.eng.extract_archive(str(self.arch), str(self.tmp / "out"))
+        self.assertIn("unrar: liste-yok-unrar", str(cm.exception))
 
     @need("unrar")
     def test_rar_entry_limit(self):
