@@ -6,6 +6,7 @@ Matching Nashi's FeatureCatalog.json (45 input formats, 27 tools, 6 file actions
 import csv
 import gzip
 import html
+import io
 import json
 import math
 import os
@@ -118,6 +119,37 @@ ACTION_DEFS: List[Dict[str, str]] = [
     {"id": "terminal", "title_tr": "Terminalde Aç", "title_en": "Terminal", "symbol": ">_"},
     {"id": "share", "title_tr": "Klasörde Göster", "title_en": "Show in Folder", "symbol": "🔍"},
 ]
+
+
+def decode_text_bytes(data: bytes, legacy_encoding: str = "cp1254") -> str:
+    """Decodes text files the way upstream LegacyTextCodec does.
+
+    UTF-32 / UTF-16 by byte order mark, UTF-16 without BOM by its NUL-byte
+    pattern, then strict UTF-8 (BOM dropped), else the legacy ANSI code page
+    (Windows-1254, Turkish) instead of lossy U+FFFD replacement."""
+    for bom, codec in ((b"\xff\xfe\x00\x00", "utf-32-le"), (b"\x00\x00\xfe\xff", "utf-32-be"),
+                       (b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+        if data.startswith(bom):
+            return data[len(bom):].decode(codec, errors="replace")
+    length = len(data)
+    if length >= 4 and length % 2 == 0:
+        head = data[: min(length, 128 * 1024) & ~1]
+        count = len(head)
+        even = head[0::2].count(0)
+        odd = head[1::2].count(0)
+        if odd * 6 >= count and odd > even * 2:
+            return data.decode("utf-16-le", errors="replace")
+        if even * 6 >= count and even > odd * 2:
+            return data.decode("utf-16-be", errors="replace")
+    try:
+        return data.decode("utf-8").lstrip("\ufeff")
+    except UnicodeDecodeError:
+        return data.decode(legacy_encoding, errors="replace")
+
+
+def read_text_file(path: str) -> str:
+    with open(path, "rb") as f:
+        return decode_text_bytes(f.read())
 
 
 class NashiEngine:
@@ -1679,8 +1711,8 @@ class NashiEngine:
 
     def convert_subtitle(self, input_path: str, target_format: str, output_path: str) -> str:
         """Converts between SRT, VTT, and plain text."""
-        with open(input_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        # BOM / UTF-16 / UTF-8 / Windows-1254 detection; normalise CRLF line ends.
+        content = read_text_file(input_path).replace("\r\n", "\n").replace("\r", "\n")
 
         src_ext = self.normalize_extension(input_path)
         tgt = target_format.lower().lstrip(".")
@@ -1736,8 +1768,8 @@ class NashiEngine:
     def _convert_tabular(self, input_path: str, output_path: str, src_ext: str, tgt_ext: str) -> str:
         """Converts CSV <-> TSV <-> PDF/HTML."""
         in_delim = "\t" if src_ext == "tsv" else ","
-        with open(input_path, "r", encoding="utf-8", errors="replace", newline="") as f:
-            rows = list(csv.reader(f, delimiter=in_delim))
+        text = read_text_file(input_path)  # BOM / UTF-16 / UTF-8 / Windows-1254
+        rows = list(csv.reader(io.StringIO(text, newline=""), delimiter=in_delim))
 
         if tgt_ext in ("csv", "tsv"):
             out_delim = "\t" if tgt_ext == "tsv" else ","
