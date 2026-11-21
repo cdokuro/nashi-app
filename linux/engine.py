@@ -758,6 +758,10 @@ class NashiEngine:
             cmd.extend(["-c:a", "flac"])
         elif fmt in ("aac", "m4a"):
             cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+        elif fmt == "ogg":
+            cmd.extend(["-c:a", "libvorbis", "-q:a", "4"])
+        elif fmt == "opus":
+            cmd.extend(["-c:a", "libopus", "-b:a", "128k"])
         else:
             cmd.extend(["-c:a", "copy"])
 
@@ -1048,8 +1052,30 @@ class NashiEngine:
         if not shutil.which("zbarimg"):
             raise RuntimeError("Required tool 'zbarimg' (zbar-tools) is not installed.")
 
-        cmd = ["zbarimg", "--quiet", "--raw", image_path]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # Transparent pixels are usually stored as black; a QR drawn on a
+        # transparent PNG/GIF then reads as an all-black image. Flatten the
+        # (first frame of the) image onto white before handing it to zbarimg.
+        scan_path = image_path
+        flat_tmp = None
+        if shutil.which("magick"):
+            fd, flat_tmp = tempfile.mkstemp(prefix="nashi-qr-", suffix=".png")
+            os.close(fd)
+            try:
+                self._run_cmd([
+                    "magick", f"{image_path}[0]",
+                    "-background", "white", "-alpha", "remove", "-alpha", "off",
+                    flat_tmp,
+                ], desc="QR flatten")
+                scan_path = flat_tmp
+            except RuntimeError:
+                scan_path = image_path  # unreadable for magick: let zbarimg try the original
+
+        try:
+            cmd = ["zbarimg", "--quiet", "--raw", scan_path]
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        finally:
+            if flat_tmp and os.path.exists(flat_tmp):
+                os.remove(flat_tmp)
         if result.returncode == 0:
             decoded = result.stdout.strip()
             if decoded:
