@@ -626,11 +626,16 @@ class ImageEditDialog(QDialog):
 class MediaTrimDialog(QDialog):
     """Interactive dialog for Video/Audio Trim and Video Speed changes."""
 
-    def __init__(self, tool_id: str, media_path: str, duration: float = 10.0, theme: str = "dark", parent=None):
+    # Upper bound for the spin boxes when the duration could not be read (24 h).
+    UNKNOWN_DURATION_LIMIT = 24 * 3600.0
+
+    def __init__(self, tool_id: str, media_path: str, duration: Optional[float] = None, theme: str = "dark", parent=None):
         super().__init__(parent)
         self.tool_id = tool_id
         self.media_path = media_path
-        self.duration = max(1.0, float(duration))
+        # None = unknown: no fake ceiling, "Out" defaults to the end of the file.
+        self.duration_known = duration is not None
+        self.duration = max(1.0, float(duration)) if self.duration_known else self.UNKNOWN_DURATION_LIMIT
         self._theme = theme
 
         self.setWindowTitle("Medya Düzenleyici — Nashi")
@@ -643,7 +648,8 @@ class MediaTrimDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
 
-        lbl_file = QLabel(f"🎬 {os.path.basename(self.media_path)}  ({self.duration:.1f} sn)")
+        dur_text = f"{self.duration:.1f} sn" if self.duration_known else "süre bilinmiyor"
+        lbl_file = QLabel(f"🎬 {os.path.basename(self.media_path)}  ({dur_text})")
         lbl_file.setStyleSheet("font-size: 14px; font-weight: 800;")
         layout.addWidget(lbl_file)
 
@@ -671,10 +677,16 @@ class MediaTrimDialog(QDialog):
             row_out = QHBoxLayout()
             row_out.addWidget(QLabel("Bitiş Zamanı (Out - sn):"))
             self.spin_end = QDoubleSpinBox()
-            self.spin_end.setRange(0.5, self.duration)
             self.spin_end.setSingleStep(0.5)
-            self.spin_end.setValue(min(self.duration, max(1.0, self.duration * 0.75)))
             self.spin_end.setSuffix(" sn")
+            if self.duration_known:
+                self.spin_end.setRange(0.5, self.duration)
+                self.spin_end.setValue(min(self.duration, max(1.0, self.duration * 0.75)))
+            else:
+                # The minimum (0) shows as "Sonuna kadar" and means: keep until the end.
+                self.spin_end.setRange(0.0, self.duration)
+                self.spin_end.setSpecialValueText("Sonuna kadar")
+                self.spin_end.setValue(0.0)
             row_out.addWidget(self.spin_end, stretch=1)
             layout.addLayout(row_out)
 
@@ -697,6 +709,8 @@ class MediaTrimDialog(QDialog):
         if self.tool_id == "changeVideoSpeed":
             return {"speed": self.spin_speed.value()}
         st = self.spin_start.value()
+        if not self.duration_known and self.spin_end.value() <= self.spin_end.minimum():
+            return {"start_time": f"{st:.2f}"}
         et = max(st + 0.2, self.spin_end.value())
         return {"start_time": f"{st:.2f}", "end_time": f"{et:.2f}"}
 

@@ -7,6 +7,7 @@ import csv
 import gzip
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -732,20 +733,43 @@ class NashiEngine:
         self._run_cmd(cmd, desc="GIF to video conversion")
         return output_path
 
-    def get_media_duration(self, media_path: str) -> float:
-        """Returns media duration in seconds using ffprobe."""
+    def get_media_duration(self, media_path: str) -> Optional[float]:
+        """Returns media duration in seconds using ffprobe, or None when unknown.
+
+        Never invents a value (the old fallback was a fake 10 s, which capped the
+        trim range and split files wrongly). NaN/inf/0/'N/A' mean unknown; the
+        container duration is preferred, then the first stream duration."""
         if not shutil.which("ffprobe"):
-            return 10.0
+            return None
         try:
-            out = self._run_cmd([
+            res = subprocess.run([
                 "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
+                "-show_entries", "format=duration:stream=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 media_path
-            ], desc="Probe media duration")
-            return max(0.1, float(out.strip()))
-        except Exception:
-            return 10.0
+            ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode != 0:
+            return None
+        for line in (res.stdout or "").splitlines():
+            try:
+                value = float(line.strip())
+            except ValueError:
+                continue
+            if math.isfinite(value) and value > 0:
+                return value
+        return None
+
+    def _require_media_duration(self, media_path: str) -> float:
+        duration = self.get_media_duration(media_path)
+        if duration is None:
+            raise RuntimeError(
+                f"Medya süresi okunamadı: '{os.path.basename(media_path)}'. "
+                "Bu işlem için sürenin bilinmesi gerekiyor."
+            )
+        return duration
 
     def extract_audio(self, video_path: str, format: str = "mp3", output_path: Optional[str] = None, output_dir: Optional[str] = None) -> str:
         if not os.path.exists(video_path):
@@ -842,11 +866,11 @@ class NashiEngine:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video not found: {video_path}")
 
+        duration = self._require_media_duration(video_path)
         vp = Path(video_path).resolve()
         dest_dir = Path(output_dir).resolve() if output_dir else vp.parent / f"{vp.stem}_snapshots"
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        duration = self.get_media_duration(video_path)
         count = max(1, min(12, int(count)))
         outputs = []
         for i in range(count):
@@ -873,12 +897,12 @@ class NashiEngine:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video not found: {video_path}")
 
+        duration = self._require_media_duration(video_path)
         vp = Path(video_path).resolve()
         ext = self.normalize_extension(video_path)
         dest_dir = Path(output_dir).resolve() if output_dir else vp.parent
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        duration = self.get_media_duration(video_path)
         parts = max(2, min(10, int(parts)))
         seg_len = duration / parts
         # Sub-0.05s remainder safety check (v0.7.13 parity)
