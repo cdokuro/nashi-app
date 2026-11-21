@@ -721,7 +721,7 @@ class NashiMainWindow(QMainWindow):
 
         self.chk_drag_wheel = QCheckBox("Dosya sürüklerken tuşa basıldığında (Shift / Ctrl / Alt) yüzen çarkı otomatik aç")
         self.chk_drag_wheel.setChecked(bool(self.store.get_preference("drag_wheel_enabled", True)))
-        self.chk_drag_wheel.toggled.connect(lambda v: self.store.set_preference("drag_wheel_enabled", bool(v)))
+        self.chk_drag_wheel.toggled.connect(self._set_drag_shortcuts_enabled)
         c2.addWidget(self.chk_drag_wheel)
 
         mod_choices = ["Shift", "Ctrl", "Alt"]
@@ -882,6 +882,10 @@ class NashiMainWindow(QMainWindow):
         menu.addAction(act_float)
 
         menu.addSeparator()
+        self.act_drag_toggle = self._build_drag_toggle_action()
+        menu.addAction(self.act_drag_toggle)
+
+        menu.addSeparator()
         act_quit = QAction("Çıkış", self)
         act_quit.triggered.connect(QApplication.instance().quit)
         menu.addAction(act_quit)
@@ -897,8 +901,33 @@ class NashiMainWindow(QMainWindow):
             else:
                 self.bring_to_front()
 
+    def _build_drag_toggle_action(self) -> QAction:
+        """Tray checkbox for the drag + modifier wheels, bound to drag_wheel_enabled.
+        GlobalDragController reads that preference on every poll, so it applies live."""
+        lang = self.store.get_preference("language", "tr")
+        text = "Enable Drag Shortcuts" if lang == "en" else "Sürükleme Kısayollarını Etkinleştir"
+        act = QAction(text, self)
+        act.setCheckable(True)
+        act.setChecked(bool(self.store.get_preference("drag_wheel_enabled", True)))
+        act.toggled.connect(self._set_drag_shortcuts_enabled)
+        return act
+
+    def _set_drag_shortcuts_enabled(self, enabled: bool):
+        """Persists the drag-shortcut switch and keeps the tray item and Settings checkbox in step."""
+        enabled = bool(enabled)
+        self.store.set_preference("drag_wheel_enabled", enabled)
+        for widget in (getattr(self, "act_drag_toggle", None), getattr(self, "chk_drag_wheel", None)):
+            if widget is not None and widget.isChecked() != enabled:
+                widget.blockSignals(True)
+                widget.setChecked(enabled)
+                widget.blockSignals(False)
+
     def bring_to_front(self):
-        self.showNormal()
+        # showNormal() would un-maximize a maximized window; only restore when minimized.
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
         self.raise_()
         self.activateWindow()
 
