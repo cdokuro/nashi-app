@@ -112,6 +112,7 @@ import com.nashi.android.engine.MediaEngine
 import com.nashi.android.engine.PdfEngine
 import com.nashi.android.engine.QrEngine
 import com.nashi.android.engine.WebDownloadEngine
+import com.nashi.android.ui.WebMediaSnifferActivity
 import com.nashi.android.ui.components.RadialConversionWheel
 import com.nashi.android.ui.components.WheelAction
 import com.nashi.android.ui.theme.LocalNashiPalette
@@ -482,13 +483,27 @@ private fun NashiMainShell(
                                 latestResult = repository.recordOutput("Web İndirme", res.file, res.mimeType)
                                 repository.emitToast("İndirildi: ${res.file.name}")
                             } else {
-                                repository.emitToast("Bağlantıdan medya indirilemedi")
+                                // Site uses JS player / Cloudflare / HLS stream -> open built-in Nashi Media Browser Sniffer!
+                                repository.emitToast("Sayfa Nashi Medya Tarayıcı'da açılıyor — oynat veya İndir'e tıkla!")
+                                WebMediaSnifferActivity.launch(context, url)
                             }
                         }
                     }
                 ) { Text("İndir") }
             },
-            dismissButton = { TextButton(onClick = { showWebDialog = false }) { Text("İptal") } }
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        enabled = webUrlInput.isNotBlank(),
+                        onClick = {
+                            val url = webUrlInput.trim()
+                            showWebDialog = false
+                            WebMediaSnifferActivity.launch(context, url)
+                        }
+                    ) { Text("Tarayıcıda Yakala") }
+                    TextButton(onClick = { showWebDialog = false }) { Text("İptal") }
+                }
+            }
         )
     }
 
